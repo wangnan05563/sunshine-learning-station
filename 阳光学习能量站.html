@@ -353,6 +353,7 @@
     <button class="btn" id="childModeBtn" data-act="toggle-childmode" style="width:100%;margin-top:8px;background:#ffd966;color:#5a3d00">🧒 儿童大图标模式：关</button>
     <button class="btn" data-act="export" style="width:100%;margin-top:8px">⬇️ 导出数据（JSON）</button>
     <button class="btn" data-act="import" style="width:100%;margin-top:8px">⬆️ 导入数据（JSON）</button>
+    <p class="hint" id="exportRemind" style="display:none;color:#b26a00;margin:6px 0 0"></p>
     <button class="btn" data-act="snapshot-now" style="width:100%;margin-top:8px;background:#cfe8ff;color:#0c447c">📸 立即生成本机快照</button>
     <button class="btn" data-act="open-recovery" style="width:100%;margin-top:8px;background:#e8f5e9;color:#1b5e20">🛟 存档恢复（本机快照列表）</button>
     <button class="btn" data-act="print" style="width:100%;margin-top:8px;background:#cfe8ff;color:#0c447c">🖨️ 打印 / A4 清单</button>
@@ -1044,6 +1045,7 @@ function save(){
 }
 function ensureIds(){
   if(!state) return;
+  if(!state.meta || typeof state.meta !== "object") state.meta = { version:1, schema:"sunshine_station" };
   if(state.theme !== "dark") state.theme = "light";
   if(typeof state.childMode !== "boolean") state.childMode = false;
   if(!state.rewards) state.rewards = defaultRewards();
@@ -2258,17 +2260,45 @@ function _promptCancel(){
 }
 
 /* ---------- 导入 / 导出 ---------- */
+/* FR-25：导出文件完整性校验和（FNV-1a 32bit，非密码学用途，防截断/篡改的可检测性） */
+function fnv1a32(str){
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
 function exportFile(){
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type:"application/json" });
+  if(!state.meta || typeof state.meta !== "object") state.meta = { version:1, schema:"sunshine_station" };
+  state.meta.lastExportAt = todayStr();   // FR-25：记录导出日，驱动「14 天未导出」提醒
+  save();
+  const core = JSON.stringify(state);
+  const payload = JSON.parse(core);
+  payload.meta = Object.assign({}, payload.meta, {
+    exportedAt: new Date().toISOString(),
+    childCount: (payload.children || []).length,
+    checksum: fnv1a32(core)
+  });
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type:"application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = "阳光学习能量站-"+todayStr()+".json";
   a.click();
   URL.revokeObjectURL(a.href);
-  toast("已导出数据文件");
+  toast("已导出数据文件（含完整性校验）");
+}
+/* FR-25：距上次导出 ≥14 天（或从未导出）时提醒 */
+function exportReminderDue(){
+  const le = (state && state.meta && state.meta.lastExportAt) || null;
+  if (!le) return true;
+  return diffDays(le, todayStr()) >= 14;
 }
 function validateImport(d){
   if(!d || typeof d !== "object") throw new Error("不是对象");
+  // FR-25：新版导出带 checksum → 去除元数据附加键后重算比对；旧版无 checksum 文件照常兼容
+  if(d.meta && typeof d.meta.checksum === "string"){
+    const o = JSON.parse(JSON.stringify(d));
+    ["exportedAt","childCount","checksum"].forEach(k=>{ if(o.meta) delete o.meta[k]; });
+    if(fnv1a32(JSON.stringify(o)) !== d.meta.checksum) throw new Error("文件完整性校验失败（可能被截断或修改）");
+  }
   if(d.subjects && !d.children) throw new Error("旧版单档案格式已不支持，请用本版导出文件重新导出");
   if(!Array.isArray(d.children) || d.children.length === 0) throw new Error("缺少孩子档案");
   if(d.children.length > 20) throw new Error("孩子数量超过上限(20)");
@@ -2592,6 +2622,17 @@ function openParentHub(){
     const el = document.getElementById(id); if(el) el.classList.remove("show");
   });
   document.getElementById("parentHub").classList.add("show");
+  // FR-25：14 天未导出提醒条（仅显示，不打断操作、不弹窗）
+  const rem = document.getElementById("exportRemind");
+  if (rem){
+    const due = exportReminderDue();
+    rem.style.display = due ? "block" : "none";
+    if (due){
+      const le = (state.meta && state.meta.lastExportAt) || null;
+      rem.textContent = le ? ("⏰ 已 "+diffDays(le, todayStr())+" 天未导出存档，建议点上方「导出数据」备份（快照仅防同浏览器丢失）")
+                           : ("⏰ 这台设备还没有导出过存档，建议点上方「导出数据」保存一份异地备份");
+    }
+  }
 }
 function closeParentHub(){
   document.getElementById("parentHub").classList.remove("show");
@@ -2747,6 +2788,7 @@ var __APP__ = {
   SNAPSHOT_KEY: SNAPSHOT_KEY, SNAP_MAX: SNAP_MAX, SNAP_INTERVAL_MS: SNAP_INTERVAL_MS,
   getSnapshots: getSnapshots, takeSnapshot: takeSnapshot, restoreSnapshot: restoreSnapshot,
   openRecoveryPanel: openRecoveryPanel, renderRecoveryList: renderRecoveryList,
+  fnv1a32: fnv1a32, exportReminderDue: exportReminderDue,
   get needsRecovery(){ return needsRecovery; }, set needsRecovery(v){ needsRecovery = v; }
 };
 (function(){
