@@ -357,6 +357,16 @@
   .tag-filter{ display:flex; align-items:center; gap:8px; margin:4px 0 8px; }
   .tag-filter select{ padding:6px 8px; border:1px solid var(--line); border-radius:9px; font-size:13px; background:var(--card); color:var(--ink); }
   .tag-stats .bar-track i{ background:var(--green); }
+  /* FR-36 移动端大目标数字键盘：默认隐藏，小屏或触屏才出现，桌面保持原生输入 */
+  .num-pad{ display:none; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px; }
+  .num-key{ min-height:48px; font-size:20px; font-weight:800; border:1px solid var(--line); border-radius:12px; background:var(--card); color:var(--ink); padding:0; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
+  .num-key:active{ transform:scale(.97); }
+  .num-key-fn{ font-size:15px; color:var(--muted); }
+  .touch-ui #pinEntry .num-pad, .touch-ui #promptDialog.num .num-pad{ display:grid; }
+  @media (max-width:480px){
+    #pinEntry .num-pad, #promptDialog.num .num-pad{ display:grid; }
+    .num-key{ min-height:52px; }   /* 拇指区再抬高一点，满足 ≥48px 目标尺寸 */
+  }
   .stock{ font-size:12px; color:#888; }
   /* F 动效增强：顶栏阳光浮动提示 */
   .float-sun{ position:fixed; right:18px; top:54px; font-weight:800; font-size:15px; pointer-events:none; animation:float-sun 1.6s ease-out forwards; z-index:9999; }
@@ -422,6 +432,7 @@
     <p id="pinEntryReward" class="hint"></p>
     <input id="pinInput" type="password" inputmode="numeric" maxlength="6" autocomplete="off"
            style="width:100%;padding:10px;font-size:20px;border-radius:10px;border:1px solid var(--line);letter-spacing:6px;text-align:center" />
+    <div class="num-pad-slot" id="pinPad"></div>
     <button class="btn green" data-act="submit-pin" style="margin-top:12px;width:100%">确认兑换</button>
     <p class="hint">兑换仅记账；现实活动仍由家长线下决定。</p>
   </div>
@@ -520,6 +531,7 @@
   <div class="sheet" style="max-width:380px">
     <h2 id="promptTitle">请输入</h2>
     <input id="promptInput" class="ed-name" style="width:100%;margin-top:8px" />
+    <div class="num-pad-slot" id="promptPad"></div>
     <div style="display:flex;gap:10px;margin-top:14px">
       <button class="btn" data-act="prompt-cancel" style="flex:1;background:#e6e6e6;color:#555">取消</button>
       <button class="btn green" data-act="prompt-ok" style="flex:1">确定</button>
@@ -2498,15 +2510,16 @@ function renderPiggyBank(){
     '</div>';
 }
 
-function promptPiggyDeposit(){
+async function promptPiggyDeposit(){
   const c = cur(); if(!c) return;
-  const val = prompt("存入存钱罐的阳光值（当前可花 "+c.sunshine+"☀️）：", "50");
+  // FR-36：金额是纯数字输入，小屏/触屏走大按键键盘；校验仍在 depositToPiggy，逻辑不变
+  const val = await showPrompt("存入存钱罐的阳光值（当前可花 "+c.sunshine+"☀️）：", "50", { numeric:true });
   if(val !== null && val !== "") depositToPiggy(val);
 }
 
-function promptPiggyWithdraw(){
+async function promptPiggyWithdraw(){
   const c = cur(); if(!c) return;
-  const val = prompt("从存钱罐取出的阳光值（余额 "+c.piggyBank.balance+"☀️）：", "50");
+  const val = await showPrompt("从存钱罐取出的阳光值（余额 "+c.piggyBank.balance+"☀️）：", "50", { numeric:true });
   if(val !== null && val !== "") withdrawFromPiggy(val);
 }
 
@@ -3171,6 +3184,7 @@ function dismissToast(){
 /* === MODULE 6：浮层与确认/输入（O9 自定义 dialog，showConfirm/showPrompt 委托钩子兼容测试） === */
 /* ---------- O9 自定义确认/输入浮层（替代原生 confirm/prompt，统一 UX） ---------- */
 let _confirmResolve = null, _promptResolve = null;
+let _promptNumeric = false;   // FR-36：本次 showPrompt 是否为数字输入（决定是否可用大按键键盘）
 function showConfirm(message, title){
   if (typeof globalThis !== "undefined" && typeof globalThis.__confirmHook === "function"){
     return globalThis.__confirmHook(message, title);            // 测试 / 注入钩子优先（O6 兼容回归脚本）
@@ -3192,7 +3206,8 @@ function _confirmCancel(){
   const d = document.getElementById("confirmDialog"); if(d) d.classList.remove("show");
   const r = _confirmResolve; _confirmResolve = null; if(r) r(false);
 }
-function showPrompt(message, def){
+function showPrompt(message, def, opts){
+  _promptNumeric = !!(opts && opts.numeric);
   if (typeof globalThis !== "undefined" && typeof globalThis.__promptHook === "function"){
     return globalThis.__promptHook(message, def);             // 测试 / 注入钩子优先（O6 兼容回归脚本）
   }
@@ -3202,7 +3217,10 @@ function showPrompt(message, def){
     document.getElementById("promptTitle").textContent = message || "请输入";
     const inp = document.getElementById("promptInput");
     inp.value = (def != null) ? def : "";
-    document.getElementById("promptDialog").classList.add("show");
+    const dlg = document.getElementById("promptDialog");
+    dlg.classList.toggle("num", _promptNumeric);              // FR-36：数字场景才允许弹出大按键
+    dlg.classList.add("show");
+    renderNumPads();
     setTimeout(()=>{ if(inp){ inp.focus(); try{ inp.select(); }catch(_){} } }, 30);
   });
 }
@@ -3215,6 +3233,68 @@ function _promptOk(){
 function _promptCancel(){
   const d = document.getElementById("promptDialog"); if(d) d.classList.remove("show");
   const r = _promptResolve; _promptResolve = null; if(r) r(null);
+}
+
+/* ---------- FR-36 移动端大目标数字键盘（仅 UI 层；不改任何校验/记账逻辑） ---------- */
+/* 小屏判定：≤480px 或粗指针（触屏）。桌面保持原生输入，不渲染键盘 */
+function isCompactInput(){
+  if (typeof window === "undefined") return false;
+  try {
+    const coarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+    const narrow = ((typeof window.innerWidth === "number" ? window.innerWidth : 1024) <= 480);
+    return coarse || narrow;
+  } catch(e){ return false; }
+}
+/* 是否为真触屏（粗指针）：只用于决定要不要屏蔽系统小键盘，窄窗口的桌面用户仍可键入 */
+function isTouchPointer(){
+  if (typeof window === "undefined") return false;
+  try { return !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches); }
+  catch(e){ return false; }
+}
+const NUMPAD_KEYS = ["1","2","3","4","5","6","7","8","9","clear","0","del"];
+/* 键盘标记：写进目标输入框，只产生数字与删改，不做任何数值解释 */
+function numPadHTML(targetId){
+  if(!targetId) return "";
+  const cell = k => {
+    const isFn = (k === "clear" || k === "del");
+    const label = k === "clear" ? "清空" : (k === "del" ? "删除" : k);
+    return '<button type="button" class="num-key'+(isFn?" num-key-fn":"")+'" data-act="num-key" data-pad="'+escapeHtml(targetId)+'" data-key="'+k+'">'+label+'</button>';
+  };
+  return '<div class="num-pad" role="group" aria-label="数字键盘">'+NUMPAD_KEYS.map(cell).join("")+'</div>';
+}
+/* 把键盘填进各浮层的插槽，并把触屏状态挂到根元素（CSS 据此显隐） */
+function renderNumPads(){
+  if (typeof document === "undefined") return;
+  const slots = [["pinPad","pinInput"], ["promptPad","promptInput"]];
+  slots.forEach(pair=>{
+    const el = document.getElementById(pair[0]);
+    if(el) el.innerHTML = numPadHTML(pair[1]);
+  });
+  const compact = isCompactInput();
+  const root = document.documentElement;
+  if(root && root.classList) root.classList.toggle("touch-ui", compact);
+  const coarse = isTouchPointer();
+  const pin = document.getElementById("pinInput");
+  if(pin) pin.readOnly = coarse;                       // 真触屏：只用小键盘，避免两套输入打架
+  const dlg = document.getElementById("promptDialog");
+  const pinput = document.getElementById("promptInput");
+  if(pinput) pinput.readOnly = coarse && !!(dlg && dlg.classList && dlg.classList.contains("num"));
+}
+/* 单键写入：尊重目标输入的 maxlength（审批码 6 位即由此约束） */
+function applyNumKey(targetId, key){
+  if(!targetId) return "";
+  const inp = document.getElementById(targetId);
+  if(!inp) return "";
+  let v = (typeof inp.value === "string") ? inp.value : "";
+  if(key === "clear"){ v = ""; }
+  else if(key === "del"){ v = v.slice(0, -1); }
+  else if(/^[0-9]$/.test(key)){
+    const max = parseInt(inp.getAttribute("maxlength") || "0", 10) || 0;
+    if(max > 0 && v.length >= max){ inp.value = v; return v; }
+    v += key;
+  } else { inp.value = v; return v; }
+  inp.value = v;
+  return v;
 }
 
 /* ---------- 导入 / 导出 ---------- */
@@ -3527,6 +3607,8 @@ const DISPATCH = {
   "save-pin": () => savePin(),
   "close-pinentry": () => { document.getElementById("pinEntry").classList.remove("show"); pendingRewardId = null; pendingThemeId = null; pendingReqId = null; },
   "submit-pin": () => submitPin(),
+  /* FR-36 数字键盘：只写入目标输入框，校验与记账仍由原有流程负责 */
+  "num-key": (el) => { applyNumKey(el.getAttribute("data-pad"), el.getAttribute("data-key")); },
   redeem: t => requestRedeem(t.getAttribute("data-reward")),
   export: () => exportFile(),
   import: () => doImport(),
@@ -3720,6 +3802,11 @@ async function doReset(){
 
 /* ---------- 启动 ---------- */
 load();
+// FR-36：小屏/触屏判定要在首屏就同步（键盘显隐靠根元素 touch-ui 类）
+try { renderNumPads(); } catch(e){ /* 非浏览器环境安全降级 */ }
+if (typeof window !== "undefined" && typeof window.addEventListener === "function"){
+  try { window.addEventListener("resize", ()=>{ try{ renderNumPads(); }catch(e){} }); } catch(e){ /* 无 addEventListener 环境忽略 */ }
+}
 // 先完成机密字段迁移（异步），再渲染 UI，避免迁移完成前用户操作把明文写回 localStorage
 (async function(){
   try { await migrateSecrets(); } catch(e){ /* 迁移失败不影响启动，兼容路径兜底 */ }
@@ -3764,6 +3851,11 @@ var __APP__ = {
   renderTopbar: renderTopbar, renderStore: renderStore, renderNav: renderNav, renderAll: renderAll,
   renderEditor: renderEditor, computeProgress: computeProgress, escapeHtml: escapeHtml,
   applyDelta: applyDelta, sameSubject: sameSubject, normalizeSubject: normalizeSubject, stripSubject: stripSubject,
+  /* —— FR-36 移动端数字键盘 —— */
+  NUMPAD_KEYS: NUMPAD_KEYS, isCompactInput: isCompactInput, isTouchPointer: isTouchPointer,
+  numPadHTML: numPadHTML, renderNumPads: renderNumPads, applyNumKey: applyNumKey, showPrompt: showPrompt,
+  promptOk: _promptOk, promptCancel: _promptCancel,
+  get promptNumeric(){ return _promptNumeric; },
   dayKeyLocal: dayKeyLocal,
   openStats: openStats, closeStats: closeStats,
   buildHeatmapHTML: buildHeatmapHTML, heatCellClick: heatCellClick,
