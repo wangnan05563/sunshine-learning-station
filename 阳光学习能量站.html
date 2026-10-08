@@ -227,6 +227,13 @@
     0%{ transform:translateY(-10px) rotate(0); opacity:1; }
     100%{ transform:translateY(105vh) rotate(var(--rot,360deg)); opacity:.85; }
   }
+  /* FR-32 轻量档：小颗粒 + 短程下落，高频小胜利不用全量彩带刷屏 */
+  .confetti.confetti-sm{ width:6px; height:9px; animation-duration:1.4s; }
+  /* FR-34 家长中心提示音开关与音量滑杆 */
+  .sound-box{ margin-top:8px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; background:var(--card); }
+  .sound-vol-row{ display:flex; align-items:center; gap:8px; margin-top:6px; }
+  .sound-vol-row input[type=range]{ flex:1; }
+  .sound-box .btn[data-act="toggle-sound"]{ margin-top:0; }
   .celebrate-bubble{
     position:absolute; left:50%; top:38%; transform:translate(-50%,-50%);
     background:#fff; color:var(--green-d); font-weight:800; font-size:20px;
@@ -438,6 +445,13 @@
     <button class="btn" data-act="open-race" style="width:100%;margin-top:8px;background:#e67e22;color:#fff">🏁 专注挑战赛</button>
     <button class="btn" data-act="open-sync" style="width:100%;margin-top:8px;background:#3aa76d;color:#fff">☁️ 云同步设置（WebDAV）</button>
     <button class="btn" data-act="toggle-theme" style="width:100%;margin-top:8px">🌗 切换亮 / 暗主题</button>
+    <div class="sound-box">
+      <button class="btn" id="soundBtn" data-act="toggle-sound" style="width:100%;background:#7fb3d5;color:#123">🔔 完成提示音：开</button>
+      <div class="sound-vol-row">
+        <span class="hint">音量</span>
+        <input type="range" id="soundVol" data-act="sound-volume" min="0" max="100" step="10" value="60">
+      </div>
+    </div>
     <button class="btn" id="childModeBtn" data-act="toggle-childmode" style="width:100%;margin-top:8px;background:#ffd966;color:#5a3d00">🧒 儿童大图标模式：关</button>
     <button class="btn" data-act="export" style="width:100%;margin-top:8px">⬇️ 导出数据（JSON）</button>
     <button class="btn" data-act="import" style="width:100%;margin-top:8px">⬆️ 导入数据（JSON）</button>
@@ -1034,6 +1048,7 @@ function buildDefaultState(){
     meta:{ version:1, schema:"sunshine_station" },
     theme:"light",
     childMode:false,
+    sound:{ enabled:true, volume:0.6 },
     rewards: defaultRewards(),
     themes: defaultThemes(),
     ownedThemes: ["light","dark"],
@@ -1201,6 +1216,11 @@ function ensureIds(){
   if(!state) return;
   if(!state.meta || typeof state.meta !== "object") state.meta = { version:1, schema:"sunshine_station" };
   if(typeof state.childMode !== "boolean") state.childMode = false;
+  // FR-34 提示音偏好：缺失/脏值一律回落到「开 + 0.6」，音量限幅 0~1
+  if(!state.sound || typeof state.sound !== "object") state.sound = { enabled:true, volume:0.6 };
+  if(typeof state.sound.enabled !== "boolean") state.sound.enabled = true;
+  if(typeof state.sound.volume !== "number" || isNaN(state.sound.volume)) state.sound.volume = 0.6;
+  state.sound.volume = Math.max(0, Math.min(1, state.sound.volume));
   // FR-26 主题目录与拥有态归一化（light/dark 为内置必备项，缺失即补回，避免主题卡死）
   if(!Array.isArray(state.themes) || !state.themes.length) state.themes = defaultThemes();
   else {
@@ -1416,6 +1436,7 @@ function toggleTask(taskId){
   const amount = found.done ? 5 : -5;
   if (found.done) c.badgeStats.taskDone++;   // FR-31 累计完成次数（只增不减：周期任务重置不倒退成就）
   addSunshine(amount, "task", found.done ? ("完成："+found.title) : ("取消："+found.title));
+  if (found.done) playChime("done");         // FR-34：勾选完成才响，取消不响（避免负反馈配音效）
   updatePerfectWeek();
   save();
   // O3b 局部重渲染：勾选任务只重建内容面板 + 顶栏统计（不动 nav/store/编辑器外的全量 render）
@@ -1507,6 +1528,7 @@ function redeem(rewardId){
   save(); renderAll(); renderStore();
   if (document.getElementById("contentEditor").classList.contains("show")) renderEditor();
   toast("已记账 -"+r.cost+"☀️："+r.title);
+  playChime("redeem");   // FR-34 兑换琶音
 }
 function setName(n){
   const c = cur(); if(!c) return;
@@ -1598,7 +1620,8 @@ function checkDailyMilestone(){
     if (pct >= tr.pct && c.dailyAward.tiers.indexOf(tr.pct) < 0){
       c.dailyAward.tiers.push(tr.pct);
       addSunshine(tr.bonus, "milestone_daily", "当日完成"+tr.pct+"%奖励");
-      if (tr.pct >= 100) celebrate({ type:"dailyfull", text:"今日任务全清！+"+tr.bonus+"☀️" });
+      // FR-32：当日最后一个任务属高频小胜利，走轻量档彩带
+      if (tr.pct >= 100) celebrate({ type:"dailyfull", level:"light", text:"今日任务全清！+"+tr.bonus+"☀️" });
       else toast("完成度过半，追加 +"+tr.bonus+"☀️");
     }
   });
@@ -1640,10 +1663,78 @@ function updatePerfectWeek(){
   Object.keys(c.dayLog).forEach(k=>{ if (diffDays(k, today) > 60) delete c.dayLog[k]; });
 }
 
-/* 庆祝反馈动效（FR-17）：纯 DOM 彩带 + 弹跳气泡，无外部依赖；非浏览器环境安全跳过 */
+/* FR-34 完成提示音：WebAudio 振荡器实时合成（零音频资源文件），总时长 ≤400ms；
+   无 AudioContext 的环境（老浏览器/非浏览器/被策略禁用）一律安全跳过，不抛错也不阻塞交互 */
+let __audioCtx = null;
+function audioCtx(){
+  if (typeof window === "undefined") return null;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try {
+    if (!__audioCtx) __audioCtx = new AC();
+    if (__audioCtx.state === "suspended" && __audioCtx.resume) __audioCtx.resume();
+  } catch(e){ return null; }
+  return __audioCtx;
+}
+/* done=双音上行；redeem=三音琶音。[频率, 起始偏移秒, 音长秒] */
+const CHIMES = {
+  done:   [ [784, 0, 0.1], [1046, 0.1, 0.14] ],
+  redeem: [ [659, 0, 0.09], [831, 0.09, 0.09], [988, 0.18, 0.16] ]
+};
+function playChime(kind){
+  const notes = CHIMES[kind];
+  if (!notes) return false;
+  const s = (typeof state !== "undefined" && state && state.sound) || null;
+  if (s && s.enabled === false) return false;
+  const ctx = audioCtx();
+  if (!ctx || !ctx.createOscillator || !ctx.createGain) return false;
+  const vol = (s && typeof s.volume === "number") ? Math.max(0, Math.min(1, s.volume)) : 0.6;
+  if (vol <= 0) return false;
+  try {
+    const t0 = ctx.currentTime;
+    notes.forEach(n=>{
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = n[0];
+      g.gain.setValueAtTime(0, t0 + n[1]);
+      g.gain.linearRampToValueAtTime(vol * 0.22, t0 + n[1] + 0.012);   // 轻起音防爆音
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + n[1] + n[2]);
+      osc.connect(g); g.connect(ctx.destination);
+      osc.start(t0 + n[1]); osc.stop(t0 + n[1] + n[2] + 0.02);
+    });
+  } catch(e){ return false; }
+  return true;
+}
+function setSoundEnabled(v){
+  if (typeof state === "undefined" || !state) return;
+  state.sound.enabled = !!v;
+  save(); renderParentHub();
+  if (state.sound.enabled) playChime("done");
+  toast(state.sound.enabled ? "提示音已开启" : "提示音已静音");
+}
+function setSoundVolume(raw){
+  if (typeof state === "undefined" || !state) return;
+  const n = Number(raw);
+  state.sound.volume = (isNaN(n) ? 0.6 : Math.max(0, Math.min(1, n)));
+  save();
+  playChime("done");   // 拖完滑杆立刻给一次反馈，音量是否合适一听就知道
+}
+function renderParentHub(){
+  if (typeof document === "undefined") return;
+  const btn = document.getElementById("soundBtn");
+  if (btn) btn.textContent = (state && state.sound && state.sound.enabled) ? "🔔 完成提示音：开" : "🔕 完成提示音：关";
+  const rng = document.getElementById("soundVol");
+  if (rng) rng.value = String(Math.round(((state && state.sound && state.sound.volume) || 0) * 100));
+}
+
+/* 庆祝反馈动效（FR-17）：纯 DOM 彩带 + 弹跳气泡，无外部依赖；非浏览器环境安全跳过。
+   FR-32 补强：opts.level="light" 走减半档（≤30 粒、时长与散落幅度减半），
+   用于「完成当日最后一个任务」这类高频小胜利；兑换/抽奖中奖等峰值时刻保持默认全量档 */
+const CONFETTI = { full:{ n:80, ms:2600, spread:0.3 }, light:{ n:30, ms:1500, spread:0.15 } };
 function celebrate(opts){
   opts = opts || {};
   if (typeof document === "undefined" || !document.body || !document.body.appendChild) return;
+  const cfg = CONFETTI[opts.level === "light" ? "light" : "full"];
   let layer = document.getElementById("confetti-layer");
   if (!layer){
     layer = document.createElement("div");
@@ -1652,15 +1743,15 @@ function celebrate(opts){
     document.body.appendChild(layer);
   }
   const colors = ["#ffb300","#3aa76d","#ff6b6b","#4d96ff","#ff8fab","#9b5de5"];
-  for (let i=0;i<80;i++){
+  for (let i=0;i<cfg.n;i++){
     const p = document.createElement("div");
-    p.className = "confetti";
+    p.className = "confetti" + (opts.level === "light" ? " confetti-sm" : "");
     p.style.left = (Math.random()*100) + "vw";
     p.style.background = colors[i % colors.length];
-    p.style.animationDelay = (Math.random()*0.3) + "s";
+    p.style.animationDelay = (Math.random()*cfg.spread) + "s";
     p.style.setProperty("--rot", (Math.random()*720-360) + "deg");
     layer.appendChild(p);
-    setTimeout(()=>{ if (p.parentNode) p.parentNode.removeChild(p); }, 2600);
+    setTimeout(()=>{ if (p.parentNode) p.parentNode.removeChild(p); }, cfg.ms);
   }
   document.querySelectorAll(".topbar .stat .v").forEach(v=>{
     v.classList.add("bump"); setTimeout(()=>v.classList.remove("bump"), 600);
@@ -1845,7 +1936,7 @@ async function submitPin(){
   if(themeId){ redeemTheme(themeId); return; }   // redeemTheme 内部完成扣费、启用与庆祝
   const id = pendingRewardId; pendingRewardId = null;
   redeem(id);
-  celebrate({ type:"redeem", text:"兑换成功！🎉" });
+  celebrate({ type:"redeem", level:"full", text:"兑换成功！🎉" });   // FR-32：兑换用全量档
 }
 
 /* ---------- 视图层 ---------- */
@@ -2112,7 +2203,8 @@ function spinWheel(){
     }
     
     document.getElementById("wheelResult").textContent = "🎉 恭喜获得：" + prize.title;
-    celebrate({ type:"lottery", text:"转盘抽中「"+prize.title+"」！" });
+    celebrate({ type:"lottery", level:"full", text:"转盘抽中「"+prize.title+"」！" });   // FR-32：中奖用全量档
+    playChime("redeem");   // FR-34：中奖与兑换共用琶音
     const cc = cur();
     if(cc && cc.badgeStats){ cc.badgeStats.lotteryWin = true; }   // FR-31 转盘首中
     save(); renderStore(); evaluateBadges();
@@ -3198,6 +3290,7 @@ const DISPATCH = {
   "heat-next": () => { if(heatOffset < 0){ heatOffset += 1; renderStats(); } },
   "heat-cell": t => heatCellClick(t.getAttribute("data-date")),
   "equip-badge": t => toggleEquipBadge(t.getAttribute("data-badge-id")),
+  "toggle-sound": () => setSoundEnabled(!(state && state.sound && state.sound.enabled)),
   "open-wheel": () => openWheelDialog(),
   "close-wheel": () => document.getElementById("wheelDialog").classList.remove("show"),
   "spin-wheel": () => spinWheel(),
@@ -3222,6 +3315,7 @@ const DISPATCH = {
   "race-again": () => { resetRace(); renderRace(); }
 };
 function openParentHub(){
+  renderParentHub();   // FR-34：打开时回填提示音开关与音量滑杆
   // 进入家长中心前收起其它浮层，避免叠加
   ["store","pinSettings","syncPanel","contentEditor","pinEntry"].forEach(id=>{
     const el = document.getElementById(id); if(el) el.classList.remove("show");
@@ -3251,6 +3345,8 @@ document.addEventListener("click", e=>{
 document.addEventListener("change", e=>{
   const tg = e.target.closest('[data-act="toggle"]');
   if(tg){ onTaskToggle(tg.getAttribute("data-task")); return; }
+  const sv = e.target.closest('[data-act="sound-volume"]');
+  if(sv){ setSoundVolume(sv.value); return; }
   const ed = e.target.closest('[data-edit]');
   if(ed){
     const f = ed.getAttribute("data-edit");
@@ -3379,6 +3475,8 @@ var __APP__ = {
   BADGES: BADGES, BADGE_RULES: BADGE_RULES, BADGE_MULTIPLIER: BADGE_MULTIPLIER,
   badgeMultiplier: badgeMultiplier, evaluateBadges: evaluateBadges, badgeCount: badgeCount, buildBadgeWallHTML: buildBadgeWallHTML,
   normalizeBadgeFields: normalizeBadgeFields, findBadge: findBadge, toggleEquipBadge: toggleEquipBadge,
+  CHIMES: CHIMES, CONFETTI: CONFETTI, playChime: playChime,
+  setSoundEnabled: setSoundEnabled, setSoundVolume: setSoundVolume, renderParentHub: renderParentHub,
   addSunshine: addSunshine,
   get wheelSpinning(){ return WHEEL_SPINNING; }, set wheelSpinning(v){ WHEEL_SPINNING = v; },
   get wheelRotation(){ return WHEEL_ROTATION; }, set wheelRotation(v){ WHEEL_ROTATION = v; },
