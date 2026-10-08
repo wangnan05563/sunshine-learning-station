@@ -257,6 +257,19 @@
   .trend-net{ font-size:11px; font-weight:700; }
   .trend-net.up{ color:#3aa76d; }
   .trend-net.down{ color:#f2994a; }
+  .heat-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .heat-title{ font-weight:800; }
+  .heat-nav{ border:1px solid #ddd; background:#fff; border-radius:8px; padding:2px 10px; font-size:14px; cursor:pointer; }
+  .heat-nav:disabled{ opacity:.35; cursor:default; }
+  .heat-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+  .heat-wd{ text-align:center; font-size:11px; color:#888; }
+  .heat-cell{ aspect-ratio:1/1; border-radius:6px; background:#eee; display:flex; align-items:center; justify-content:center; font-size:11px; color:#bbb; cursor:pointer; }
+  .heat-cell.heat-future{ opacity:.35; cursor:default; }
+  .heat-cell.heat-done{ background:#ffd8a8; color:#8a5a00; }
+  .heat-cell.heat-perfect{ background:#3aa76d; color:#fff; font-weight:700; }
+  .heat-legend{ display:flex; gap:14px; align-items:center; margin-top:8px; font-size:11px; color:#888; }
+  .heat-legend i{ display:inline-block; width:12px; height:12px; border-radius:4px; margin-right:4px; vertical-align:-2px; }
+  #heatHint{ min-height:16px; }
   .stock{ font-size:12px; color:#888; }
   /* F 动效增强：顶栏阳光浮动提示 */
   .float-sun{ position:fixed; right:18px; top:54px; font-weight:800; font-size:15px; pointer-events:none; animation:float-sun 1.6s ease-out forwards; z-index:9999; }
@@ -1376,12 +1389,13 @@ function onTaskToggle(taskId){
 function updatePerfectWeek(){
   const c = cur(); if(!c) return;
   const today = todayStr();
-  let total = 0, done = 0;
+  let total = 0, done = 0, dailyTotal = 0, dailyDone = 0;
   c.subjects.forEach(s=>s.units.forEach(u=>u.tasks.forEach(t=>{
-    if (t.recur === "daily"){ total++; if (t.done) done++; }
+    if (taskVisible(t)){ total++; if (t.done) done++; }
+    if (t.recur === "daily"){ dailyTotal++; if (t.done) dailyDone++; }
   })));
-  const perfect = (total > 0 && done === total);
-  c.dayLog[today] = { perfect:perfect };
+  const perfect = (dailyDone > 0 && dailyDone === dailyTotal);
+  c.dayLog[today] = { perfect:perfect, done:done, total:total };
   if (perfect){
     if (c.lastPerfectDate !== today){
       if (c.lastPerfectDate && diffDays(c.lastPerfectDate, today) === 1) c.perfectStreak += 1;
@@ -1745,13 +1759,55 @@ function renderStats(){
     return '<div class="trend-col"><div class="trend-bar '+(x.net>=0?"up":"down")+'" style="height:'+h+'%"></div><div class="trend-day">'+x.label+'</div><div class="trend-net '+(x.net>=0?"up":"down")+'">'+(x.net>0?"+":"")+x.net+'</div></div>';
   }).join("");
   const trendSec='<h3 style="margin:16px 0 6px">📈 近 7 天阳光增减</h3><div class="trend-chart">'+bars+'</div><p class="hint">柱高按每日净增减比例绘制；绿色=当日净赚，橙色=当日净兑出。</p>';
-  body.innerHTML=ov+subjSec+trendSec;
+  const heatSec='<h3 style="margin:16px 0 6px">🗓️ 月历打卡热力图</h3>'+buildHeatmapHTML(c)+'<p class="hint">点击日期格可查看当日完成数；绿色=当日任务全部完成，浅橙=部分完成。</p>';
+  body.innerHTML=ov+subjSec+trendSec+heatSec;
 }
-function openStats(){ const __ph=document.getElementById("parentHub"); if(__ph) __ph.classList.remove("show"); renderStats(); document.getElementById("statsDialog").classList.add("show"); }
+function openStats(){ heatOffset=0; const __ph=document.getElementById("parentHub"); if(__ph) __ph.classList.remove("show"); renderStats(); document.getElementById("statsDialog").classList.add("show"); }
 function closeStats(){ const el=document.getElementById("statsDialog"); if(el) el.classList.remove("show"); }
+
+/* ---------- FR-28 月历打卡热力图（纯 CSS grid，复用 dayLog 的 done/total 计数） ---------- */
+function buildHeatmapHTML(c){
+  const ref = new Date();
+  const y = ref.getFullYear(), m = ref.getMonth();
+  const view = new Date(y, m + heatOffset, 1);
+  const vy = view.getFullYear(), vm = view.getMonth();
+  const isCur = (vy === y && vm === m);
+  const daysInMonth = new Date(vy, vm + 1, 0).getDate();
+  const firstWd = (new Date(vy, vm, 1).getDay() + 6) % 7; // 周一为第一列
+  const title = vy + " 年 " + (vm + 1) + " 月";
+  const ml = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][vm];
+  const backLabel = "← 上月";
+  let cells = "";
+  for (let i = 0; i < firstWd; i++) cells += '<div class="heat-cell heat-empty" style="visibility:hidden"></div>';
+  const todayK = dayKeyLocal(ref);
+  for (let d = 1; d <= daysInMonth; d++){
+    const key = vy + "-" + ("0" + (vm + 1)).slice(-2) + "-" + ("0" + d).slice(-2);
+    const e = c.dayLog[key];
+    let cls = "heat-cell", attr = "";
+    if (key > todayK){ cls += " heat-future"; }
+    else if (e && e.perfect){ cls += " heat-perfect"; }
+    else if (e && (e.done || 0) > 0){ cls += " heat-done"; }
+    if (cls.indexOf("heat-future") < 0) attr = ' data-act="heat-cell" data-date="' + key + '"';
+    cells += '<div' + attr + ' class="' + cls + '">' + d + '</div>';
+  }
+  const wd = ["一","二","三","四","五","六","日"].map(x=>'<div class="heat-wd">'+x+'</div>').join("");
+  return '<div class="heat-head"><button class="heat-nav" data-act="heat-prev">'+backLabel+'</button>'
+    + '<span class="heat-title">'+ml+' · '+title+'</span>'
+    + '<button class="heat-nav" data-act="heat-next"'+(isCur?' disabled':'')+'>下月 →</button></div>'
+    + '<div class="heat-grid">'+wd+cells+'</div>'
+    + '<div class="heat-legend"><span><i style="background:#eee"></i>未打卡</span><span><i style="background:#ffd8a8"></i>部分完成</span>'
+    + '<span><i style="background:#3aa76d"></i>全部完成</span><span id="heatHint" class="hint" style="margin:0"></span></div>';
+}
+function heatCellClick(dateKey){
+  const c = cur(); if(!c) return;
+  const hint = document.getElementById("heatHint"); if(!hint) return;
+  const e = c.dayLog[dateKey];
+  hint.textContent = "📅 " + dateKey + "：" + (e ? (e.done||0) + "/" + (e.total||0) + " 项完成" + (e.perfect ? "（全部完成）" : "") : "无打卡记录");
+}
 
 /* === MODULE 5b：本地周报（Phase14 G，离线优先，无需后端） === */
 var weeklyOffset = 0; // 0=本周，-1=上周，…（仅周报导航，不持久化）
+var heatOffset = 0;   // FR-28 月历热力图：0=本月，-1=上月，…（仅视图导航，不持久化）
 
 // 以周一为起点的本周/指定周区间（本地时区）
 function weekRange(offset){
@@ -2636,6 +2692,9 @@ const DISPATCH = {
   "undo-cancel": () => undoCancel(),
   "open-stats": () => openStats(),
   "close-stats": () => closeStats(),
+  "heat-prev": () => { heatOffset = (heatOffset < 0 ? 0 : heatOffset - 1); renderStats(); },
+  "heat-next": () => { if(heatOffset < 0){ heatOffset += 1; renderStats(); } },
+  "heat-cell": t => heatCellClick(t.getAttribute("data-date")),
   "open-weekly": () => openWeeklyReport(),
   "close-weekly": () => closeWeeklyReport(),
   "weekly-prev": () => shiftWeekly(-1),
@@ -2796,6 +2855,8 @@ var __APP__ = {
   addLevel: addLevel, updateLevel: updateLevel, removeLevel: removeLevel,
   renderContent: renderContent, computeSunTrend: computeSunTrend, renderStats: renderStats,
   openStats: openStats, closeStats: closeStats,
+  buildHeatmapHTML: buildHeatmapHTML, heatCellClick: heatCellClick,
+  get heatOffset(){ return heatOffset; }, set heatOffset(v){ heatOffset = v; },
   weekRange: weekRange, weekKeyRange: weekKeyRange, computeWeekly: computeWeekly,
   buildWeeklyHTML: buildWeeklyHTML, renderWeekly: renderWeekly,
   openWeeklyReport: openWeeklyReport, closeWeeklyReport: closeWeeklyReport,
