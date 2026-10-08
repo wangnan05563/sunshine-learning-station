@@ -351,6 +351,12 @@
   .badge-tile.badge-worn{ border-color:#d99b0b; box-shadow:0 0 0 2px #f3d27a inset; cursor:pointer; }
   .badge-tile[data-act]{ cursor:pointer; }
   .badge-goldmark{ display:inline-block; margin-left:3px; font-size:9px; color:#8a6a12; background:#fbeec4; border-radius:6px; padding:0 4px; vertical-align:1px; }
+  /* FR-35 行为标签：任务卡角标 + 编辑器输入 + 统计第三维（全部走主题变量，暗色/主题包自适应） */
+  .task-tag{ flex:0 0 auto; max-width:88px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; font-weight:700; color:var(--muted); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:1px 6px; margin-left:6px; }
+  .ed-tag{ width:132px; padding:6px 8px; border:1px solid var(--line); border-radius:9px; font-size:13px; background:var(--card); color:var(--ink); }
+  .tag-filter{ display:flex; align-items:center; gap:8px; margin:4px 0 8px; }
+  .tag-filter select{ padding:6px 8px; border:1px solid var(--line); border-radius:9px; font-size:13px; background:var(--card); color:var(--ink); }
+  .tag-stats .bar-track i{ background:var(--green); }
   .stock{ font-size:12px; color:#888; }
   /* F 动效增强：顶栏阳光浮动提示 */
   .float-sun{ position:fixed; right:18px; top:54px; font-weight:800; font-size:15px; pointer-events:none; animation:float-sun 1.6s ease-out forwards; z-index:9999; }
@@ -628,6 +634,43 @@ const GRADE_LABELS = { "1":"一年级","2":"二年级","3":"三年级","4":"四�
 /* ---------- 任务重复方式（N1 周期模型增强） ---------- */
 const RECUR_VALUES = ["once","daily","weekly","weekdays","adhoc"];
 const RECUR_LABELS = { once:"一次性", daily:"每日", weekly:"每周", weekdays:"工作日", adhoc:"临时" };
+
+/* ---------- FR-35 行为标签（任务可选分类，仅用于家长统计与卡片角标） ---------- */
+/* 标签只是元数据：绝不参与阳光计算、周期重置与推荐优先级，缺省即无标签 */
+const TAG_PRESETS = ["学习", "健康", "责任", "生活习惯"];
+const TAG_NONE = "无标签";
+const TAG_MAX_LEN = 12;
+/* 单个标签值清洗：非字符串一律视为无标签，去空白限长，保证角标不撑破布局 */
+function sanitizeTag(raw){
+  if(typeof raw !== "string") return "";
+  const s = raw.replace(/\s+/g, " ").trim();
+  return s.length > TAG_MAX_LEN ? s.slice(0, TAG_MAX_LEN) : s;
+}
+/* 把一个孩子的所有任务标签洗成合法值（原地） */
+function normalizeTaskTags(c){
+  if(!c || !Array.isArray(c.subjects)) return;
+  c.subjects.forEach(s=>{
+    if(!s || !Array.isArray(s.units)) return;
+    s.units.forEach(u=>{
+      if(!u || !Array.isArray(u.tasks)) return;
+      u.tasks.forEach(t=>{ if(t) t.tag = sanitizeTag(t.tag); });
+    });
+  });
+}
+/* 标签出现顺序：内置四类在前，自定义按字典序，无标签永远最后 */
+function tagKeysInOrder(tags){
+  const keys = Object.keys(tags);
+  const named = keys.filter(k => k !== TAG_NONE);
+  named.sort((a,b)=>{
+    const ia = TAG_PRESETS.indexOf(a), ib = TAG_PRESETS.indexOf(b);
+    if(ia >= 0 && ib >= 0) return ia - ib;
+    if(ia >= 0) return -1;
+    if(ib >= 0) return 1;
+    return a < b ? -1 : (a > b ? 1 : 0);
+  });
+  if(keys.indexOf(TAG_NONE) >= 0) named.push(TAG_NONE);
+  return named;
+}
 
 /* 本周一日期串（用于 weekly/weekdays 的跨周重置判定） */
 function mondayStr(){
@@ -953,7 +996,7 @@ function sameSubject(a, b){
   if(a.id!==b.id || a.name!==b.name || a.color!==b.color) return false;
   const norm = s=>(s.units||[]).map(u=>({
     id:u.id, title:u.title,
-    tasks:(u.tasks||[]).map(t=>({ id:t.id, title:t.title, done:!!t.done, recur:t.recur||"once" }))
+    tasks:(u.tasks||[]).map(t=>({ id:t.id, title:t.title, done:!!t.done, recur:t.recur||"once", tag:sanitizeTag(t.tag) }))
   }));
   return JSON.stringify(norm(a)) === JSON.stringify(norm(b));
 }
@@ -963,7 +1006,7 @@ function stripSubject(s){
     id:s.id, name:s.name, color:s.color,
     units:(s.units||[]).map(u=>({
       id:u.id, title:u.title,
-      tasks:(u.tasks||[]).map(t=>({ id:t.id, title:t.title, done:!!t.done, recur:t.recur||"once" }))
+      tasks:(u.tasks||[]).map(t=>({ id:t.id, title:t.title, done:!!t.done, recur:t.recur||"once", tag:sanitizeTag(t.tag) }))
     }))
   };
 }
@@ -981,7 +1024,8 @@ function normalizeSubject(src, id, fallbackColor){
         id: t.id || (id+"-t"+(Math.random()*1e6|0)),
         title: (typeof t.title === "string") ? t.title : "",
         done: !!t.done,
-        recur: (typeof t.recur === "string") ? t.recur : "once"
+        recur: (typeof t.recur === "string") ? t.recur : "once",
+        tag: sanitizeTag(t.tag)
       }))
     }))
   };
@@ -1348,6 +1392,7 @@ function ensureIds(){
     // FR-31 徽章拥有态与累计赚取统计兼容
     normalizeBadgeFields(c);
     normalizeRequests(c);
+    normalizeTaskTags(c);
     c.subjects.forEach(s=>{
       s.units.forEach((u,ui)=>{
         if(!u.id) u.id = s.id+"-u"+ui;
@@ -1892,7 +1937,7 @@ async function removeUnit(subjId, unitId){
 }
 function addTask(subjId, unitId){
   const u=findUnit(subjId,unitId); if(!u) return;
-  u.tasks.push({ id:newTaskId(subjId,unitId), title:"新任务", done:false, recur:"once" });
+  u.tasks.push({ id:newTaskId(subjId,unitId), title:"新任务", done:false, recur:"once", tag:"" });
   save(); renderAll(); renderEditor();
 }
 function renameTask(subjId, unitId, taskId, title){
@@ -2251,9 +2296,10 @@ function renderContent(){
     unitsHtml = s.units.map(u=>{
       const tasks = u.tasks.filter(taskVisible).map(t=>{
         const recurSel = '<select class="recur-sel" data-act="set-recur" data-task="'+escapeHtml(t.id)+'" title="重复方式">'+recurOptions(t.recur)+'</select>';
+        const tagChip = t.tag ? '<span class="task-tag" title="行为标签">'+escapeHtml(t.tag)+'</span>' : '';
         return '<label class="task '+(t.done?"done":"")+'">' +
         '<input type="checkbox" data-act="toggle" data-task="'+escapeHtml(t.id)+'" '+(t.done?"checked":"")+' />' +
-        '<span class="label">'+escapeHtml(t.title)+'</span>' +
+        '<span class="label">'+escapeHtml(t.title)+'</span>' + tagChip +
         '<span class="sun">+5☀️</span>' + recurSel + '</label>';
       }).join("");
       return '<div class="unit"><h3>📘 '+escapeHtml(u.title)+'</h3>'+tasks+'</div>';
@@ -2507,17 +2553,60 @@ function buildBadgeWallHTML(c){
     '<div class="badge-wall">'+tiles+'</div>' +
     '<p class="hint">金色徽章可佩戴 1 枚：佩戴期间完成任务获得的阳光 ×'+BADGE_MULTIPLIER+'（向下取整），打卡、里程碑、抽奖与兑换不参与；卸下立即恢复 1×。徽章只能靠达成解锁，家长也无法手动发放。</p>';
 }
+/* ---------- FR-35 行为标签：家长统计第三维（只读聚合，不参与阳光计算） ---------- */
+/* 按标签聚合今日可见任务；未打标签归入 TAG_NONE 桶 */
+function computeTagStats(c){
+  const map = {};
+  if(!c || !Array.isArray(c.subjects)) return [];
+  c.subjects.forEach(s=>{
+    (s.units||[]).forEach(u=>{
+      (u.tasks||[]).forEach(t=>{
+        if(!t || !taskVisible(t)) return;
+        const key = t.tag || TAG_NONE;
+        if(!map[key]) map[key] = { tag:key, total:0, done:0 };
+        map[key].total++;
+        if(t.done) map[key].done++;
+      });
+    });
+  });
+  return tagKeysInOrder(map).map(k=>map[k]);
+}
+function buildTagFilterHTML(tags){
+  const opts = ['<option value="all"'+(statsTagFilter==="all"?" selected":"")+'>全部标签</option>']
+    .concat(tags.map(t=>'<option value="'+escapeHtml(t)+'"'+(statsTagFilter===t?" selected":"")+'>'+escapeHtml(t)+'</option>'));
+  return '<div class="tag-filter"><span class="hint">按行为标签筛选</span><select data-edit="statsTag">'+opts.join("")+'</select></div>';
+}
+function buildTagStatsHTML(c){
+  const rowsAll = computeTagStats(c);
+  const rows = statsTagFilter === "all" ? rowsAll : rowsAll.filter(r=>r.tag === statsTagFilter);
+  const bars = rows.map(r=>{
+    const pct = r.total ? Math.round(r.done / r.total * 100) : 0;
+    return '<div class="bar-row"><span class="bar-name">'+escapeHtml(r.tag)+'</span><span class="bar-track"><i style="width:'+pct+'%;background:var(--green)"></i></span><span class="bar-val">'+r.done+'/'+r.total+' · '+pct+'%</span></div>';
+  }).join("");
+  return buildTagFilterHTML(rowsAll.map(r=>r.tag)) +
+    (bars ? '<div class="tag-stats">'+bars+'</div>' : '<p class="hint">这个标签下暂时没有任务</p>') +
+    '<p class="hint">标签只用于分类查看，不参与阳光计算；「'+TAG_NONE+'」包含所有没打标签的任务。给任务打标签：家长中心 → 内容编辑 → 任务行「标签」框。</p>';
+}
 function renderStats(){
   const c=cur(); if(!c) return;
   const body=document.getElementById("statsBody"); if(!body) return;
   const card=(k,v)=>'<div class="stat-card"><div class="cv">'+escapeHtml(String(v))+'</div><div class="ck">'+escapeHtml(String(k))+'</div></div>';
+  // 标签已被家长清空/改名时筛选条件自动失效，避免统计页出现空口径
+  if(statsTagFilter !== "all" && !computeTagStats(c).some(r=>r.tag === statsTagFilter)) statsTagFilter = "all";
   let total=0, done=0;
   c.subjects.forEach(s=>s.units.forEach(u=>u.tasks.forEach(t=>{ if(taskVisible(t)){ total++; if(t.done) done++; } })));
-  const ov='<div class="stat-cards">'+card("☀️ 阳光值",c.sunshine)+card("🏅 当前等级",levelOf(c.sunshine))+card("🔥 连续打卡",c.streakDays+" 天")+card("✅ 任务完成",done+"/"+total)+'</div>';
+  let shownTotal=0, shownDone=0;
+  c.subjects.forEach(s=>s.units.forEach(u=>u.tasks.forEach(t=>{
+    if(!taskVisible(t)) return;
+    if(statsTagFilter === "all" || (t.tag || TAG_NONE) === statsTagFilter){ shownTotal++; if(t.done) shownDone++; }
+  })));
+  const doneLabel = "✅ 任务完成" + (statsTagFilter==="all" ? "" : "（"+statsTagFilter+"）");
+  const ov='<div class="stat-cards">'+card("☀️ 阳光值",c.sunshine)+card("🏅 当前等级",levelOf(c.sunshine))+card("🔥 连续打卡",c.streakDays+" 天")+card(doneLabel,shownDone+"/"+shownTotal)+'</div>';
   const subjBars=c.subjects.map(s=>{ const p=computeProgress(s.id);
     return '<div class="bar-row"><span class="bar-name">'+escapeHtml(s.name)+'</span><span class="bar-track"><i style="width:'+p+'%;background:'+safeColor(s.color)+'"></i></span><span class="bar-val">'+p+'%</span></div>';
   }).join("");
   const subjSec='<h3 style="margin:14px 0 6px">📚 各学科完成率</h3>'+(subjBars||'<p class="hint">暂无学科</p>');
+  const tagSec='<h3 style="margin:16px 0 6px">🏷️ 行为标签完成率</h3>'+buildTagStatsHTML(c);
   const trend=computeSunTrend(c,7);
   const maxAbs=Math.max(1,...trend.map(x=>Math.abs(x.net)));
   const bars=trend.map(x=>{ const h=Math.round(Math.abs(x.net)/maxAbs*100);
@@ -2526,9 +2615,9 @@ function renderStats(){
   const trendSec='<h3 style="margin:16px 0 6px">📈 近 7 天阳光增减</h3><div class="trend-chart">'+bars+'</div><p class="hint">柱高按每日净增减比例绘制；绿色=当日净赚，橙色=当日净兑出。</p>';
   const heatSec='<h3 style="margin:16px 0 6px">🗓️ 月历打卡热力图</h3>'+buildHeatmapHTML(c)+'<p class="hint">点击日期格可查看当日完成数；绿色=当日任务全部完成，浅橙=部分完成。</p>';
   const badgeSec='<h3 style="margin:16px 0 6px">🏅 成就徽章</h3>'+buildBadgeWallHTML(c);
-  body.innerHTML=ov+subjSec+trendSec+heatSec+badgeSec;
+  body.innerHTML=ov+subjSec+tagSec+trendSec+heatSec+badgeSec;
 }
-function openStats(){ heatOffset=0; const __ph=document.getElementById("parentHub"); if(__ph) __ph.classList.remove("show"); renderStats(); document.getElementById("statsDialog").classList.add("show"); }
+function openStats(){ heatOffset=0; statsTagFilter="all"; const __ph=document.getElementById("parentHub"); if(__ph) __ph.classList.remove("show"); renderStats(); document.getElementById("statsDialog").classList.add("show"); }
 function closeStats(){ const el=document.getElementById("statsDialog"); if(el) el.classList.remove("show"); }
 
 /* ---------- FR-28 月历打卡热力图（纯 CSS grid，复用 dayLog 的 done/total 计数） ---------- */
@@ -2574,6 +2663,7 @@ function heatCellClick(dateKey){
 /* === MODULE 5b：本地周报（Phase14 G，离线优先，无需后端） === */
 var weeklyOffset = 0; // 0=本周，-1=上周，…（仅周报导航，不持久化）
 var heatOffset = 0;   // FR-28 月历热力图：0=本月，-1=上月，…（仅视图导航，不持久化）
+var statsTagFilter = "all";   // FR-35 统计第三维筛选："all"=全部标签，否则为标签名或 TAG_NONE（仅视图筛选，不持久化）
 
 // 以周一为起点的本周/指定周区间（本地时区）
 function weekRange(offset){
@@ -2925,6 +3015,8 @@ function renderEditor(){
   let h = ch;
   h += '<h3 style="margin:14px 0 6px">一、学科 / 单元 / 任务</h3>';
   h += '<p class="hint">提示：按住每行左侧的 ⠿ 手柄可上下拖动排序（学科 / 单元 / 任务均支持）。</p>';
+  h += '<p class="hint">🏷️ 行为标签（FR-35）可选填：从「'+TAG_PRESETS.join(' / ')+'」里选一个，或直接输入自定义标签。标签只用于统计页分类和任务卡角标，<b>不影响阳光计算</b>；留空即无标签。</p>';
+  h += '<datalist id="tagPresets">'+TAG_PRESETS.map(t=>'<option value="'+escapeHtml(t)+'"></option>').join("")+'</datalist>';
   c.subjects.forEach(s=>{
     h += '<div class="ed-subj" data-drag="subject" data-id="'+escapeHtml(s.id)+'">';
     h += '<div class="ed-row"><span class="ed-grip" draggable="true" data-drag="subject" data-id="'+escapeHtml(s.id)+'" title="拖拽排序学科">⠿</span><input class="ed-name" data-edit="subjectName" data-id="'+escapeHtml(s.id)+'" value="'+escapeHtml(s.name)+'" />';
@@ -2938,6 +3030,7 @@ function renderEditor(){
       u.tasks.forEach(t=>{
         h += '<div class="ed-row ed-task" data-drag="task" data-subj="'+escapeHtml(s.id)+'" data-unit="'+escapeHtml(u.id)+'" data-task="'+escapeHtml(t.id)+'"><span class="ed-grip" draggable="true" data-drag="task" data-subj="'+escapeHtml(s.id)+'" data-unit="'+escapeHtml(u.id)+'" data-task="'+escapeHtml(t.id)+'" title="拖拽排序任务">⠿</span><span class="ed-dash">•</span><input class="ed-name" data-edit="taskTitle" data-subj="'+escapeHtml(s.id)+'" data-unit="'+escapeHtml(u.id)+'" data-task="'+escapeHtml(t.id)+'" value="'+escapeHtml(t.title)+'" />';
         h += '<select data-edit="taskRecur" data-subj="'+escapeHtml(s.id)+'" data-unit="'+escapeHtml(u.id)+'" data-task="'+escapeHtml(t.id)+'">'+recurOptions(t.recur)+'</select>';
+        h += '<input class="ed-tag" data-edit="taskTag" data-task="'+escapeHtml(t.id)+'" list="tagPresets" maxlength="'+TAG_MAX_LEN+'" placeholder="🏷️标签（可留空）" title="行为标签：仅用于统计与角标，不影响阳光" value="'+escapeHtml(t.tag || '')+'" />';
         h += '<button class="ed-mini danger" data-act="del-task" data-subj="'+escapeHtml(s.id)+'" data-unit="'+escapeHtml(u.id)+'" data-task="'+escapeHtml(t.id)+'">🗑</button></div>';
       });
       h += '<button class="ed-mini" data-act="add-task" data-subj="'+escapeHtml(s.id)+'" data-unit="'+escapeHtml(u.id)+'">➕任务</button>';
@@ -3214,6 +3307,7 @@ async function importFile(file){
     c.piggyBank = (c.piggyBank && typeof c.piggyBank === "object") ? c.piggyBank : { balance:0, weeklyRate:0.05, lastInterestDate:null };
     normalizeBadgeFields(c);
     normalizeRequests(c);
+    normalizeTaskTags(c);
     if(typeof c.grade !== "string") c.grade = "5";
     if(c.pin === undefined || c.pin === null) c.pin = "";
     if(typeof c.sunshine !== "number") c.sunshine = 0;
@@ -3312,6 +3406,7 @@ function applyRemote(data, remoteAt){
     c.piggyBank = (c.piggyBank && typeof c.piggyBank === "object") ? c.piggyBank : { balance:0, weeklyRate:0.05, lastInterestDate:null };
     normalizeBadgeFields(c);
     normalizeRequests(c);
+    normalizeTaskTags(c);
     if(typeof c.grade !== "string") c.grade = "5";
     if(c.pin === undefined || c.pin === null) c.pin = "";
     if(typeof c.sunshine !== "number") c.sunshine = 0;
@@ -3554,6 +3649,8 @@ document.addEventListener("change", e=>{
     else if(f==="levelName") updateLevel(id, "name", val);
     else if(f==="levelMin") updateLevel(id, "min", val);
     else if(f==="taskRecur") setRecur(task, val);
+    else if(f==="taskTag") setTaskTag(task, val);
+    else if(f==="statsTag"){ statsTagFilter = (val === "all") ? "all" : sanitizeTag(val); renderStats(); }
     else if(f==="switchChild") switchChild(val);
   }
 });
@@ -3571,6 +3668,19 @@ function setRecur(taskId, val){
   if(!found) return;
   found.recur = RECUR_VALUES.indexOf(val) >= 0 ? val : "once";
   save(); renderAll();
+}
+/* FR-35 打标签：只改元数据，不动 done/recur/sunshine；空白即清除标签 */
+function setTaskTag(taskId, raw){
+  const c = cur(); if(!c) return false;
+  let found=null;
+  c.subjects.forEach(s=>s.units.forEach(u=>u.tasks.forEach(t=>{ if(t.id===taskId) found=t; })));
+  if(!found) return false;
+  const next = sanitizeTag(raw);
+  if(next === (found.tag || "")) return true;
+  found.tag = next;
+  save(); renderAll();
+  if(document.getElementById("statsDialog").classList.contains("show")) renderStats();
+  return true;
 }
 async function addChild(){
   const raw = await showPrompt("新孩子的名字：", "小伙伴");
@@ -3652,6 +3762,8 @@ var __APP__ = {
   addLevel: addLevel, updateLevel: updateLevel, removeLevel: removeLevel,
   renderContent: renderContent, computeSunTrend: computeSunTrend, renderStats: renderStats,
   renderTopbar: renderTopbar, renderStore: renderStore, renderNav: renderNav, renderAll: renderAll,
+  renderEditor: renderEditor, computeProgress: computeProgress, escapeHtml: escapeHtml,
+  applyDelta: applyDelta, sameSubject: sameSubject, normalizeSubject: normalizeSubject, stripSubject: stripSubject,
   dayKeyLocal: dayKeyLocal,
   openStats: openStats, closeStats: closeStats,
   buildHeatmapHTML: buildHeatmapHTML, heatCellClick: heatCellClick,
@@ -3672,6 +3784,11 @@ var __APP__ = {
   findRequest: findRequest, applyRedeem: applyRedeem, approveRequest: approveRequest,
   finalizeApprove: finalizeApprove, rejectRequest: rejectRequest, renderRequests: renderRequests,
   renderMyRequests: renderMyRequests, requestRowHTML: requestRowHTML, fmtDateTime: fmtDateTime,
+  TAG_PRESETS: TAG_PRESETS, TAG_NONE: TAG_NONE, TAG_MAX_LEN: TAG_MAX_LEN,
+  sanitizeTag: sanitizeTag, normalizeTaskTags: normalizeTaskTags, tagKeysInOrder: tagKeysInOrder,
+  computeTagStats: computeTagStats, buildTagStatsHTML: buildTagStatsHTML, buildTagFilterHTML: buildTagFilterHTML,
+  setTaskTag: setTaskTag,
+  get statsTagFilter(){ return statsTagFilter; }, set statsTagFilter(v){ statsTagFilter = v; },
   addSunshine: addSunshine,
   get wheelSpinning(){ return WHEEL_SPINNING; }, set wheelSpinning(v){ WHEEL_SPINNING = v; },
   get wheelRotation(){ return WHEEL_ROTATION; }, set wheelRotation(v){ WHEEL_ROTATION = v; },
