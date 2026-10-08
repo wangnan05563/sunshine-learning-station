@@ -353,6 +353,8 @@
     <button class="btn" id="childModeBtn" data-act="toggle-childmode" style="width:100%;margin-top:8px;background:#ffd966;color:#5a3d00">🧒 儿童大图标模式：关</button>
     <button class="btn" data-act="export" style="width:100%;margin-top:8px">⬇️ 导出数据（JSON）</button>
     <button class="btn" data-act="import" style="width:100%;margin-top:8px">⬆️ 导入数据（JSON）</button>
+    <button class="btn" data-act="snapshot-now" style="width:100%;margin-top:8px;background:#cfe8ff;color:#0c447c">📸 立即生成本机快照</button>
+    <button class="btn" data-act="open-recovery" style="width:100%;margin-top:8px;background:#e8f5e9;color:#1b5e20">🛟 存档恢复（本机快照列表）</button>
     <button class="btn" data-act="print" style="width:100%;margin-top:8px;background:#cfe8ff;color:#0c447c">🖨️ 打印 / A4 清单</button>
     <button class="btn" data-act="reset" style="width:100%;margin-top:8px;background:#e6e6e6;color:#555">↺ 重置全部数据</button>
     <button class="btn" data-act="close-parent-hub" style="width:100%;margin-top:10px">关闭</button>
@@ -368,6 +370,14 @@
       <button class="btn" data-act="confirm-cancel" style="flex:1;background:#e6e6e6;color:#555">取消</button>
       <button class="btn green" data-act="confirm-ok" style="flex:1">确定</button>
     </div>
+  </div>
+</div>
+<div class="overlay" id="recoveryDialog">
+  <div class="sheet" style="max-width:460px">
+    <button class="close" data-act="close-recovery">×</button>
+    <h2>🛟 存档恢复</h2>
+    <p class="hint">未找到本地主存档（可能被浏览器清理或数据损坏）。以下为本机快照，选择一个恢复；也可关闭后「导出数据文件」重新导入。<b>快照仅存在于当前浏览器，清缓存即失效。</b></p>
+    <div id="recoveryList"></div>
   </div>
 </div>
 <div class="overlay" id="promptDialog">
@@ -445,6 +455,9 @@ const MILESTONES = [
 ];
 const PERFECT_WEEK_BONUS = 60;  // 完美周（连续 7 天全部完成每日任务）奖励
 const LEDGER_KEEP = 1000;       // ledger 明细滚动窗口上限（FR-22：超出部分汇总为单条 anchor）
+const SNAPSHOT_KEY = "sunshine_station_snapshots";  // FR-25：本地快照轮换（同浏览器兜底，防未手动导出丢失）
+const SNAP_MAX = 8;             // 快照最多保留份数（超出滚动淘汰最旧）
+const SNAP_INTERVAL_MS = 30000; // 写盘快照最小间隔（节流，避免高频 save 放大存储写）
 
 function levelOf(s){
   const levels = (state && state.levels && state.levels.length) ? state.levels : LEVELS;
@@ -999,6 +1012,8 @@ let currentSubject = "yuwen";
 let pendingRewardId = null;
 let suppressDirty = false;
 let autoPushTimer = null;
+let needsRecovery = false;   // FR-25：主存档缺失/损坏且存在本地快照时置真，启动走恢复面板
+let lastSnapAt = 0;          // FR-25：上次快照时间戳（写盘节流）
 
 /* === MODULE 3：持久化（load/save/ensureIds/对账/裁剪/迁移） === */
 function load(){
@@ -1013,8 +1028,10 @@ function load(){
       reconcileStreak();
       resetRecurringTasks();
       return;
-    } catch(e){ /* 损坏则重建 */ }
+    } catch(e){ /* 损坏则走下方恢复判定 */ }
   }
+  // FR-25：主存档缺失/损坏——存在本地快照则进入恢复流程而非静默重建；无快照才重建默认档
+  needsRecovery = getSnapshots().items.length > 0;
   state = buildDefaultState();
   save();
 }
@@ -1022,6 +1039,7 @@ function save(){
   if(state && state.sync && state.sync.enabled && !suppressDirty) state.sync.dirty = true;
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
   catch(e){ toast("本地存储不可用，本次数据仅当前有效"); return; }
+  if(!needsRecovery) takeSnapshot(false);   // FR-25：写盘后滚动快照（节流；恢复态下不污染快照列表）
   if(state && state.sync && state.sync.enabled && state.sync.auto && !suppressDirty) scheduleAutoPush();
 }
 function ensureIds(){
@@ -1139,6 +1157,60 @@ function resetRecurringTasks(){
       c.lastWeeklyReset = mon;
     }
   });
+}
+
+/* FR-25 存档安全兜底：本地快照轮换 + 丢失恢复（作用域仅同浏览器，UI 须如实标注） */
+function getSnapshots(){
+  let raw = null;
+  try { raw = localStorage.getItem(SNAPSHOT_KEY); } catch(e){ return { items: [] }; }
+  if (!raw) return { items: [] };
+  try { const s = JSON.parse(raw); if (s && Array.isArray(s.items)) return s; } catch(e){ /* 损坏视为无 */ }
+  return { items: [] };
+}
+function setSnapshots(obj){
+  try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(obj)); return true; }
+  catch(e){
+    try {   // 配额满：淘汰最旧两份后重试一次
+      obj.items = obj.items.slice(0, Math.max(1, obj.items.length - 2));
+      localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(obj));
+      return true;
+    } catch(_){ return false; }
+  }
+}
+function takeSnapshot(force){
+  const now = Date.now();
+  if (!force && now - lastSnapAt < SNAP_INTERVAL_MS) return false;
+  lastSnapAt = now;
+  const s = getSnapshots();
+  s.items.unshift({ ts: new Date().toISOString(), childCount: (state.children || []).length, json: JSON.stringify(state) });
+  if (s.items.length > SNAP_MAX) s.items = s.items.slice(0, SNAP_MAX);
+  return setSnapshots(s);
+}
+function restoreSnapshot(i){
+  const it = getSnapshots().items[i];
+  if (!it) return false;
+  let data = null;
+  try { data = JSON.parse(it.json); } catch(e){ toast("该快照已损坏，无法恢复"); return false; }
+  try { validateImport(data); } catch(e){ toast("快照结构校验失败：" + e.message); return false; }
+  state = data; ensureIds(); reconcileStreak(); resetRecurringTasks();
+  needsRecovery = false;
+  currentSubject = cur() ? cur().subjects[0].id : "yuwen";
+  save(); renderAll(); applyTheme(); renderRecoveryList();
+  toast("已从快照恢复（" + it.ts + "）");
+  return true;
+}
+function renderRecoveryList(){
+  const box = document.getElementById("recoveryList"); if (!box) return;
+  const items = getSnapshots().items;
+  if (!items.length){ box.innerHTML = '<p class="hint">暂无可用快照。快照会在数据变动时于本机浏览器自动生成（清缓存即失效，重要数据请务必「导出数据」）。</p>'; return; }
+  box.innerHTML = items.map((it,i)=>'<button class="btn" data-act="restore-snap" data-idx="'+i+'" style="width:100%;margin-top:6px">🛟 恢复 '+escapeHtml(it.ts)+' · '+it.childCount+' 个档案</button>').join("");
+}
+function openRecoveryPanel(){
+  ["store","pinSettings","syncPanel","contentEditor","pinEntry","parentHub"].forEach(id=>{
+    const el = document.getElementById(id); if (el) el.classList.remove("show");
+  });
+  renderRecoveryList();
+  const el = document.getElementById("recoveryDialog"); if (el) el.classList.add("show");
 }
 
 /* === MODULE 4：业务逻辑（任务/打卡/奖励/阳光/等级/周期） === */
@@ -2491,6 +2563,10 @@ const DISPATCH = {
   "confirm-cancel": () => _confirmCancel(),
   "prompt-ok": () => _promptOk(),
   "prompt-cancel": () => _promptCancel(),
+  "restore-snap": t => restoreSnapshot(parseInt(t.getAttribute("data-idx"), 10)),
+  "close-recovery": () => document.getElementById("recoveryDialog").classList.remove("show"),
+  "open-recovery": () => openRecoveryPanel(),
+  "snapshot-now": () => { takeSnapshot(true); toast("已生成本机快照（仅当前浏览器内可恢复）"); },
   "toggle-childmode": () => toggleChildMode(),
   "undo-cancel": () => undoCancel(),
   "open-stats": () => openStats(),
@@ -2608,6 +2684,7 @@ load();
   try { await migrateSecrets(); } catch(e){ /* 迁移失败不影响启动，兼容路径兜底 */ }
   renderAll();
   applyTheme();
+  if (needsRecovery) openRecoveryPanel();   // FR-25：主存档缺失但有快照 → 恢复引导
 })();
 
 /* ============================================================
@@ -2665,7 +2742,12 @@ var __APP__ = {
   migrateSecrets: migrateSecrets, hashPin: hashPin, verifyPin: verifyPin,
   loadKms: loadKms, encryptSecret: encryptSecret, decryptSecret: decryptSecret,
   buildSyncPayload: buildSyncPayload, syncPush: syncPush, syncPull: syncPull, doSyncPush: doSyncPush,
-  requestRedeem: requestRedeem, submitPin: submitPin, openPinSettings: openPinSettings, savePin: savePin
+  requestRedeem: requestRedeem, submitPin: submitPin, openPinSettings: openPinSettings, savePin: savePin,
+  /* —— FR-25 存档安全兜底 —— */
+  SNAPSHOT_KEY: SNAPSHOT_KEY, SNAP_MAX: SNAP_MAX, SNAP_INTERVAL_MS: SNAP_INTERVAL_MS,
+  getSnapshots: getSnapshots, takeSnapshot: takeSnapshot, restoreSnapshot: restoreSnapshot,
+  openRecoveryPanel: openRecoveryPanel, renderRecoveryList: renderRecoveryList,
+  get needsRecovery(){ return needsRecovery; }, set needsRecovery(v){ needsRecovery = v; }
 };
 (function(){
   var g = (typeof globalThis !== "undefined") ? globalThis : (typeof window !== "undefined" ? window : this);
