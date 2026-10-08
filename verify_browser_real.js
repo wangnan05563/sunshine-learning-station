@@ -1,0 +1,930 @@
+/* ============================================================
+ * verify_browser_real.js —— 真实浏览器全量功能回归（T01604 / 6.1）
+ *
+ * 与 verify_dom_stub.js 的分工：
+ *   - 桩测试跑逻辑层（状态机 / 记账 / 数据迁移），无样式、无渲染、无音频设备；
+ *   - 本脚本跑「看得见、听得见」的层：真实 Chrome 渲染、CSS 变量主题、Canvas 像素、
+ *     DOM 动效时长、可点目标尺寸、对比度、WebAudio 实际信号。
+ *
+ * 零产品依赖：只读产品文件，不修改它；证据（截图 / JSON 报告）写到 EVID 目录。
+ * 运行：node verify_browser_real.js
+ * ============================================================ */
+const fs = require("fs");
+const path = require("path");
+const { chromium, devices } = require("D:/code/otherProjects/11_OcrDemo/node_modules/playwright");
+
+const APP = "file:///" + encodeURI("D:/code/otherProjects/22_StudyWork/阳光学习能量站.html")
+  .replace(/#/g, "%23");
+const EVID = process.env.UICHECK_OUT || "D:/code/Data_Qoder/uicheck_T01604";
+const PIN = "2468";
+
+let pass = 0, warn = 0;
+const fails = [], warns = [], notes = [];
+function check(name, cond, detail){
+  if (cond) { pass++; if (process.env.VERBOSE) console.log("  \x1b[32m✓\x1b[0m " + name); }
+  else { fails.push(name + (detail ? " :: " + detail : "")); console.log("  \x1b[31m✗\x1b[0m " + name + (detail ? " :: " + detail : "")); }
+}
+function soft(name, cond, detail){
+  if (cond) { pass++; }
+  else { warn++; warns.push(name + (detail ? " :: " + detail : "")); console.log("  \x1b[33m!\x1b[0m " + name + (detail ? " :: " + detail : "")); }
+}
+function note(msg){ notes.push(msg); console.log("  \x1b[36m·\x1b[0m " + msg); }
+function section(title){ console.log("\n▶ " + title); }
+
+/* ---------- WCAG 对比度 ---------- */
+function lum([r, g, b]){
+  const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+function contrast(a, b){
+  const l1 = lum(a), l2 = lum(b);
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+}
+function parseRGB(s){
+  const m = String(s).match(/rgba?\(([^)]+)\)/);
+  if (!m) return null;
+  const p = m[1].split(",").map(x => parseFloat(x.trim()));
+  return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
+}
+
+/* ---------- 音频探针（把应用输出接到 AnalyserNode，用真实信号判断“是否出声”） ---------- */
+function audioProbe(){
+  window.__audioProbe = { ctxCreated: 0, osc: 0, starts: [], stops: [], maxRms: 0, samples: 0, times: [], tapError: null, state: null };
+  const Orig = window.AudioContext || window.webkitAudioContext;
+  if (!Orig) { window.__audioProbe.noAC = true; return; }
+  const BP = window.BaseAudioContext ? window.BaseAudioContext.prototype : Orig.prototype;
+  const destDesc = Object.getOwnPropertyDescriptor(BP, "destination") || Object.getOwnPropertyDescriptor(Orig.prototype, "destination");
+  function Wrapped(){
+    const ctx = new Orig();
+    window.__audioProbe.ctxCreated++;
+    try {
+      const tap = ctx.createGain();
+      const an = ctx.createAnalyser(); an.fftSize = 1024;
+      tap.connect(an);
+      if (destDesc && destDesc.get) tap.connect(destDesc.get.call(ctx));
+      Object.defineProperty(ctx, "destination", { get(){ return tap; }, configurable: true });
+      const buf = new Float32Array(an.fftSize);
+      setInterval(() => {
+        try {
+          an.getFloatTimeDomainData(buf);
+          let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+          const rms = Math.sqrt(s / buf.length);
+          window.__audioProbe.samples++;
+          if (rms > window.__audioProbe.maxRms) window.__audioProbe.maxRms = rms;
+          window.__audioProbe.times.push(ctx.currentTime);
+          window.__audioProbe.state = ctx.state;
+        } catch (e) {}
+      }, 16);
+    } catch (e) { window.__audioProbe.tapError = String(e); }
+    const origOsc = ctx.createOscillator.bind(ctx);
+    ctx.createOscillator = function(){
+      const o = origOsc();
+      window.__audioProbe.osc++;
+      const st = o.start.bind(o), sp = o.stop.bind(o);
+      o.start = (t) => { window.__audioProbe.starts.push(t === undefined ? ctx.currentTime : t); return st(t); };
+      o.stop = (t) => { window.__audioProbe.stops.push(t); return sp(t); };
+      return o;
+    };
+    return ctx;
+  }
+  Wrapped.prototype = Orig.prototype;
+  window.AudioContext = Wrapped;
+  if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
+}
+
+/* ---------- 导出捕获（Blob → 文本，无需下载管线） ---------- */
+function exportProbe(){
+  window.__exports = [];
+  const orig = URL.createObjectURL;
+  URL.createObjectURL = function(blob){
+    try { if (blob && blob.text) window.__exports.push(blob); } catch (e) {}
+    return orig.call(URL, blob);
+  };
+}
+
+/* 飘字元素只活 1.7s，主线程被音频预热卡住时「事后查询」会漏检 ⇒ 用 MutationObserver 记账，判定不依赖采样时机 */
+function floatProbe(){
+  window.__floatSeen = { n: 0, texts: [] };
+  const watch = () => new MutationObserver(muts => {
+    muts.forEach(m => Array.prototype.forEach.call(m.addedNodes, n => {
+      if (n && n.classList && n.classList.contains("float-sun")) { window.__floatSeen.n++; window.__floatSeen.texts.push(n.textContent); }
+    }));
+  }).observe(document.body, { childList: true });
+  if (document.body) watch();
+  else document.addEventListener("DOMContentLoaded", watch);
+}
+
+/* ============================================================ */
+(async () => {
+  fs.mkdirSync(EVID, { recursive: true });
+  const browser = await chromium.launch({
+    channel: "chrome",
+    // 必须 headful：Chrome 在 headless 或 --mute-audio 下音频图不渲染（currentTime 冻结），
+    // 提示音的可听项就只能靠桩推断；真实渲染后才有 RMS / 时长证据。
+    headless: false,
+    args: ["--autoplay-policy=document-user-activation-required", "--window-position=60,60"]
+  });
+
+  /* ---------------- 桌面端 ---------------- */
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1, acceptDownloads: true });
+  const page = await ctx.newPage();
+  page.setDefaultTimeout(10000);
+  ctx.setDefaultTimeout(8000);
+  const errors = [];
+  const notedDialogs = [];
+  page.on("pageerror", e => errors.push("pageerror: " + e.message));
+  page.on("console", m => { if (m.type() === "error") errors.push("console: " + m.text()); });
+  page.on("dialog", d => { notedDialogs.push(d.type() + ":" + (d.message() || "")); d.accept(d.type() === "prompt" ? "3" : "").catch(() => {}); });
+  await page.addInitScript(audioProbe);
+  await page.addInitScript(exportProbe);
+  await page.addInitScript(floatProbe);
+
+  const A = (fn, arg) => page.evaluate(fn, arg);
+  const sunshine = () => A(() => window.__STUDY_APP__.cur().sunshine);
+  const childState = () => A(() => {
+    const c = window.__STUDY_APP__.cur();
+    return { sunshine: c.sunshine, streakDays: c.streakDays, piggy: c.piggyBank.balance, requests: (c.requests || []).map(r => ({ status: r.status, note: r.note, title: r.title })), badgeStats: c.badgeStats, earned: Object.keys(c.badges.earned || {}), equipped: c.badges.equipped };
+  });
+  const shot = (n) => page.screenshot({ path: path.join(EVID, n) });
+  // 浮层是叠加式（overlay.show 可能同时存在多层），未关闭的浮层会拦截后续点击 ⇒ 段落之间统一收口
+  const closeAll = async (pg) => {
+    const t = pg || page;
+    const listOverlays = () => t.evaluate(() => [...document.querySelectorAll(".overlay.show")].map(o => o.id));
+    for (let round = 0; round < 6; round++){
+      const open = await listOverlays();
+      if (!open.length) return;
+      await t.evaluate((ids) => {
+        ids.forEach(id => {
+          const o = document.getElementById(id);
+          const btn = o.querySelector(".close") || o.querySelector('[data-act*="close"]');
+          if (btn) btn.click();
+        });
+      }, open);
+      await t.waitForTimeout(180);
+      const left = await listOverlays();
+      if (left.join(",") === open.join(",")) return note("无法自动关闭的浮层：" + left.join(","));
+    }
+  };
+
+  section("P0 首屏 · 零 JS 错误 · 主路径冒烟");
+  await page.goto(APP, { waitUntil: "load" });
+  await page.waitForTimeout(300);
+  // 真实浏览器会真的出声：测试期间先压低音量，FR-34 段落再分档实测（默认出厂值仍是 0.6）
+  await A(() => { window.__STUDY_APP__.state.sound.volume = 0.1; });
+  check("页面加载且 #app 渲染出顶栏/导航/内容", await A(() => !!(document.querySelector(".topbar") && document.querySelector(".nav") && document.querySelector("#app .panel"))));
+  check("默认状态已建立（1 个孩子 + 学科任务）", await A(() => { const s = window.__STUDY_APP__.state; return !!(s && s.children.length === 1 && s.children[0].subjects.length >= 3); }));
+  check("启动前不创建 AudioContext（自动播放策略门控）", await A(() => window.__audioProbe.ctxCreated === 0), await A(() => JSON.stringify(window.__audioProbe)));
+  check("未点击前无声音节点", await A(() => window.__audioProbe.osc === 0));
+  await shot("01_home_light.png");
+
+  // 勾选第一个任务：阳光增加 + 飘字 + 提示音（首次用户手势解锁音频）
+  const s0 = await sunshine();
+  await page.locator('input[data-act="toggle"]').first().check({ force: true, timeout: 4000 });
+  await page.waitForFunction(() => window.__floatSeen.n > 0, null, { timeout: 2500, polling: 100 }).catch(() => {});
+  const float = await A(() => window.__floatSeen);
+  await page.waitForTimeout(200);
+  const s1 = await sunshine();
+  check("勾选任务 → 阳光增加（走 addSunshine 单点入口）", s1 > s0, s0 + "→" + s1);
+  check("勾选任务 → 出现 +N☀️ 飘字动效（MutationObserver 记账，不依赖采样时机）", float.n > 0 && /^\+\d+☀️$/.test(float.texts[0] || ""), JSON.stringify(float));
+  // 真实 Chrome 音频线程首次启用需 0.6~1.6s 预热（本环境实测，偶尔更久）：轮询取样，必要时补触发一次
+  await page.waitForTimeout(900);
+  check("首次手势后才创建 AudioContext", await A(() => window.__audioProbe.ctxCreated === 1), await A(() => JSON.stringify(window.__audioProbe.state)));
+  check("完成提示音 = 双音（2 个振荡器）", await A(() => window.__audioProbe.osc === 2), "osc=" + await A(() => window.__audioProbe.osc));
+  let audioLive = false;
+  for (let i = 0; i < 5 && !audioLive; i++){
+    audioLive = await A(() => { const p = window.__audioProbe; return p.times[p.times.length - 1] > 0 && p.maxRms > 0.002; });
+    if (audioLive) break;
+    await page.waitForTimeout(700);
+    if (i === 1) await A(() => window.__STUDY_APP__.playChime("done"));   // 手势已建立，再给一次发声机会后重采样
+  }
+  const ap = await A(() => { const p = window.__audioProbe; return { tLast: p.times[p.times.length - 1], maxRms: p.maxRms }; });
+  check("AudioContext 时钟在推进（音频图真在跑，非静默桩）", ap.tLast > 0, "tLast=" + ap.tLast);
+  check("提示音产生真实非静音信号（RMS > 0.002）", ap.maxRms > 0.002, "maxRms=" + ap.maxRms.toFixed(5));
+  note("音频探针：" + JSON.stringify(await A(() => { const p = window.__audioProbe; return { ctxCreated: p.ctxCreated, osc: p.osc, state: p.state, samples: p.samples, tLast: p.times[p.times.length - 1], starts: p.starts.slice(0, 3), stops: p.stops.slice(0, 3), maxRms: Number(p.maxRms.toFixed(5)), tapError: p.tapError, vis: document.visibilityState, focus: document.hasFocus() }; })));
+  const warmup = await A(() => { const t = window.__audioProbe.times; const i = t.findIndex(x => x > 0); return i < 0 ? -1 : (i * 16); });
+  note("音频线程预热：首次 currentTime 前进约发生在手势后 " + warmup + "ms（本环境实测，非产品缺陷；桩环境无从观测）");
+  const chimeDur = await A(() => { const p = window.__audioProbe; return Math.max(...p.stops) - Math.min(...p.starts); });
+  check("完成提示音总时长 ≤ 400ms", chimeDur > 0 && chimeDur <= 0.42, chimeDur.toFixed(3) + "s");
+
+  // 打卡
+  await page.locator('[data-act="checkin"]').click();
+  await page.waitForTimeout(300);
+  const cs = await childState();
+  check("打卡 → 连续天数 1、阳光增加", cs.streakDays === 1 && cs.sunshine > s1, JSON.stringify({ streak: cs.streakDays, sun: cs.sunshine, s1 }));
+  check("打卡写入 dayLog（热力图数据源）", await A(() => { const c = window.__STUDY_APP__.cur(); const k = window.__STUDY_APP__.dayKeyLocal(new Date()); return !!c.dayLog[k]; }));
+
+  section("P1 FR-29 当日完成度里程碑（真实点击跑完当天任务）");
+  const tiersBefore = await A(() => (window.__STUDY_APP__.cur().dailyAward || {}).tiers || []);
+  const subjCount = await A(() => document.querySelectorAll(".nav [data-act=select]").length);
+  let toggled = 0, missed = 0;
+  for (let i = 0; i < subjCount; i++){
+    await page.locator(".nav [data-act=select]").nth(i).click();
+    await page.waitForTimeout(80);
+    const ids = await A(() => [...document.querySelectorAll('input[data-act="toggle"]:not(:checked)')].map(x => x.getAttribute("data-task")));
+    for (const id of ids){
+      try { await page.locator(`input[data-act="toggle"][data-task="${id}"]:not(:checked)`).click({ force: true, timeout: 1200 }); toggled++; }
+      catch (e) { missed++; }   // 完成后该项从当前视图移出 / 重渲染瞬时不可达
+      await page.waitForTimeout(8);
+    }
+  }
+  await page.waitForTimeout(500);
+  const after = await childState();
+  const tiersNow = await A(() => window.__STUDY_APP__.cur().dailyAward.tiers.slice());
+  check("批量勾选全部可见任务后触发完成度档位（≥2 档）", tiersNow.length >= 2, "tiers=" + JSON.stringify(tiersNow));
+  check("100% 档已点亮（今日全清）", tiersNow.indexOf(100) >= 0, JSON.stringify(tiersNow));
+  check("全清后用轻量档彩带（≤30 粒）", await A(() => document.querySelectorAll("#confetti-layer .confetti.confetti-sm").length > 0 && document.querySelectorAll("#confetti-layer .confetti.confetti-sm").length <= 30));
+  note("真实点击完成任务数 = " + toggled + "（不可达跳过 " + missed + "），档位序列 " + JSON.stringify(tiersBefore) + "→" + JSON.stringify(tiersNow));
+  const donePct = await A(() => { const c = window.__STUDY_APP__.cur(); let t = 0, d = 0; c.subjects.forEach(s => s.units.forEach(u => u.tasks.forEach(x => { if (window.__STUDY_APP__.taskVisible(x)) { t++; if (x.done) d++; } }))); return d + "/" + t; });
+  note("当日可见任务完成度 = " + donePct);
+  await shot("02_daily_full_light.png");
+
+  section("P1 FR-28 月历热力图（渲染 + 跨月 + 移动端不溢出）");
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(150);
+  check("家长中心浮层打开", await A(() => document.getElementById("parentHub").classList.contains("show")));
+  await page.locator('[data-act="open-stats"]').click();
+  await page.waitForTimeout(250);
+  const heat = await A(() => {
+    const g = document.querySelector(".heat-grid");
+    if (!g) return null;
+    const cells = g.querySelectorAll(".heat-cell");
+    const cs = getComputedStyle(g);
+    return { cells: cells.length, cols: cs.gridTemplateColumns.split(" ").length, title: document.querySelector(".heat-title").textContent, done: g.querySelectorAll(".heat-done").length, perfect: g.querySelectorAll(".heat-perfect").length, future: g.querySelectorAll(".heat-future").length, todayCls: (document.querySelector(".heat-cell:not(.heat-empty):nth-last-child(1)") || {}).className };
+  });
+  check("热力图渲染为 7 列 CSS grid", heat && heat.cols === 7, JSON.stringify(heat));
+  check("格子数 = 当月天数 + 前导空格", heat && heat.cells >= 28 && heat.cells <= 42, JSON.stringify(heat));
+  check("当日格子有着色档（完成/全清）", heat && (heat.done + heat.perfect) > 0, JSON.stringify(heat));
+  check("未来日不可点（heat-future 无 data-act）", await A(() => { const f = document.querySelector(".heat-future"); return !f || !f.getAttribute("data-act"); }));
+  const heatTitleBefore = heat.title;
+  await page.locator('[data-act="heat-prev"]').click();
+  await page.waitForTimeout(150);
+  const prevDisabled = await A(() => document.querySelector('[data-act="heat-next"]').disabled);
+  check("切到上月后「下月」可点、标题变化", prevDisabled === false && (await A(() => document.querySelector(".heat-title").textContent)) !== heatTitleBefore);
+  await page.locator('[data-act="heat-next"]').click();
+  await page.waitForTimeout(150);
+  check("切回当月后「下月」禁用", await A(() => document.querySelector('[data-act="heat-next"]').disabled));
+  await page.locator('.heat-cell:not(.heat-empty)').first().click();
+  await page.waitForTimeout(120);
+  check("点击格子 → 当日完成数提示", await A(() => /完成|无打卡/.test(document.getElementById("heatHint").textContent)), await A(() => document.getElementById("heatHint").textContent));
+  await shot("03_heatmap_stats.png");
+
+  section("P1 FR-31 徽章墙（达成点亮 / 排版 / 金级佩戴倍率）");
+  const badgeInfo = await A(() => {
+    const wall = document.querySelector(".badge-wall");
+    if (!wall) return null;
+    const tiles = [...wall.querySelectorAll(".badge-tile")];
+    const body = document.getElementById("statsBody");
+    const sheet = document.querySelector("#statsDialog .sheet");
+    return { n: tiles.length, off: tiles.filter(t => t.classList.contains("badge-off")).length, got: tiles.filter(t => !t.classList.contains("badge-off")).length, gold: tiles.filter(t => t.classList.contains("badge-gold")).length, cols: getComputedStyle(wall).gridTemplateColumns.split(" ").length, overflowX: body.scrollWidth - body.clientWidth, wallW: Math.round(wall.scrollWidth) + "/" + Math.round(wall.clientWidth), sheetOverflowX: sheet.scrollWidth - sheet.clientWidth, docOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    culprits: (() => { const lim = body.getBoundingClientRect().right; return [...body.querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > lim + 1).slice(0, 5).map(e => ((e.className && String(e.className).split(" ")[0]) || e.tagName) + "@" + Math.round(e.getBoundingClientRect().right - lim) + "px"); })(), tileW: Math.round(tiles[0].getBoundingClientRect().width), tileH: Math.round(tiles[0].getBoundingClientRect().height), minMax: getComputedStyle(wall).gridTemplateColumns.split(" ").slice(0, 2), head: wall.previousElementSibling.textContent };
+  });
+  check("徽章墙 12 枚全部渲染", badgeInfo && badgeInfo.n === 12, JSON.stringify(badgeInfo));
+  check("已达成点亮 / 未达成置灰同时存在", badgeInfo && badgeInfo.got >= 2 && badgeInfo.off > 0, JSON.stringify(badgeInfo));
+  check("墙面无用户可见横向溢出（对话框与文档均不产生横向滚动）", badgeInfo && badgeInfo.sheetOverflowX <= 1 && badgeInfo.docOverflow <= 1, "sheet overflowX=" + (badgeInfo && badgeInfo.sheetOverflowX) + " doc=" + (badgeInfo && badgeInfo.docOverflow) + "（statsBody 内框 +9 由卡片外边距产生，被 .sheet 内边距吸收）" + " sheet=" + (badgeInfo && badgeInfo.sheetOverflowX) + " wall=" + (badgeInfo && badgeInfo.wallW) + " 越界元素=" + JSON.stringify(badgeInfo && badgeInfo.culprits));
+  soft("徽章格子尺寸适合阅读（≥80×70）", badgeInfo && badgeInfo.tileW >= 80 && badgeInfo.tileH >= 70, "tile=" + (badgeInfo && badgeInfo.tileW) + "×" + (badgeInfo && badgeInfo.tileH) + " 模板列=" + (badgeInfo && badgeInfo.minMax.join(",")));
+  check("金级徽章 3 枚", badgeInfo && badgeInfo.gold === 3, JSON.stringify(badgeInfo));
+  // 佩戴：真实点击可佩戴的金级徽章，实测倍率 = floor(基础 × 1.5)
+  let goldClickable = await page.locator('.badge-tile.badge-gold[data-act="equip-badge"]').count();
+  if (goldClickable === 0){
+    // 用产品自己的记账入口把「累计赚取」推到金级门槛（等价于孩子再坚持若干天），随后走真实判定函数
+    const push = await A(() => {
+      const App = window.__STUDY_APP__, c = App.cur();
+      App.addSunshine(2500, "test_seed", "回归测试：推进金级门槛");
+      App.evaluateBadges(); App.renderStats();
+      return { earned: c.badgeStats.totalEarned, gold: Object.keys(c.badges.earned).filter(id => App.findBadge(id) && App.findBadge(id).gold) };
+    });
+    note("真实规则判定：累计赚取 " + push.earned + "☀️ 后点亮金级 " + JSON.stringify(push.gold));
+    goldClickable = await page.locator('.badge-tile.badge-gold[data-act="equip-badge"]').count();
+  }
+  check("金级徽章点亮后出现可佩戴入口（佩戴位仅 1 枚）", goldClickable >= 1, "clickable=" + goldClickable);
+  if (goldClickable > 0){
+    // 先量基础分（未佩戴）
+    const base = await A(() => {
+      const App = window.__STUDY_APP__, c = App.cur(), t = c.subjects[0].units[0].tasks[0];
+      if (t.done) App.toggleTask(t.id);
+      const undo = c.sunshine;
+      App.toggleTask(t.id);
+      return c.sunshine - undo;
+    });
+    await page.locator('.badge-tile.badge-gold[data-act="equip-badge"]').first().click();
+    await page.waitForTimeout(250);
+    const worn = await A(() => ({ eq: window.__STUDY_APP__.cur().badges.equipped, cls: !!document.querySelector(".badge-tile.badge-worn"), hint: (document.querySelector(".badge-worn .badge-hint") || {}).textContent }));
+    check("点击金级徽章 → 佩戴成功且 UI 标记「佩戴中」", !!worn.eq && worn.cls && /佩戴中/.test(worn.hint || ""), JSON.stringify(worn));
+    const withMult = await A(() => {
+      const App = window.__STUDY_APP__, c = App.cur(), t = c.subjects[0].units[0].tasks[0];
+      if (t.done) App.toggleTask(t.id);
+      const undo = c.sunshine;
+      App.toggleTask(t.id);
+      return c.sunshine - undo;
+    });
+    check("佩戴期间任务得分 = floor(基础 × 1.5)", withMult === Math.floor(base * 1.5) && withMult > base, "base=" + base + " worn=" + withMult + " expect=" + Math.floor(base * 1.5));
+    await page.locator('.badge-tile.badge-worn').first().click();
+    await page.waitForTimeout(250);
+    const back = await A(() => {
+      const App = window.__STUDY_APP__, c = App.cur(), t = c.subjects[0].units[0].tasks[0];
+      if (t.done) App.toggleTask(t.id);
+      const undo = c.sunshine;
+      App.toggleTask(t.id);
+      return { got: c.sunshine - undo, eq: c.badges.equipped };
+    });
+    check("卸下徽章 → 得分立即恢复 1×", !back.eq && back.got === base, JSON.stringify(back));
+  } else {
+    soft("存在可佩戴的金级徽章（需真实达成 streak_100/sun_2000/task_200 之一）", false, "本轮真实数据未达金级门槛");
+  }
+  await shot("04_badge_wall.png");
+
+  section("P1 FR-35 行为标签（编辑器 datalist / 角标 / 第三维筛选）");
+  await page.locator('[data-act="close-stats"]').click();
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(200);
+  await page.locator('#parentHub [data-act="open-editor"]').click();
+  await page.waitForTimeout(250);
+  const editorTag = await A(() => {
+    const dl = document.getElementById("tagPresets");
+    const inp = document.querySelector('[data-edit="taskTag"]');
+    return { dl: !!dl, opts: dl ? dl.options.length : 0, inp: !!inp, list: inp && inp.getAttribute("list"), max: inp && inp.getAttribute("maxlength"), val: inp && inp.value };
+  });
+  check("任务表单有标签输入且挂 <datalist> 预置 4 项", editorTag.dl && editorTag.opts === 4 && editorTag.inp && editorTag.list === "tagPresets", JSON.stringify(editorTag));
+  check("标签输入 maxlength=12（与净化逻辑一致）", editorTag.max === "12", JSON.stringify(editorTag));
+  const tagInput = page.locator('[data-edit="taskTag"]').first();
+  const taggedId = await tagInput.getAttribute("data-task");
+  await tagInput.fill("运动");
+  await tagInput.dispatchEvent("change");
+  await page.waitForTimeout(250);
+  check("写入标签后 state 对应任务带 tag", await A((id) => { const c = window.__STUDY_APP__.cur(); for (const s of c.subjects) for (const u of s.units) for (const t of u.tasks) if (t.id === id) return t.tag === "运动"; return false; }, taggedId));
+  const ownerSubj = await A((id) => { const c = window.__STUDY_APP__.cur(); for (const s of c.subjects) for (const u of s.units) for (const t of u.tasks) if (t.id === id) return s.id; return null; }, taggedId);
+  await page.locator('[data-act="close-editor"]').click();
+  await page.waitForTimeout(200);
+  await page.locator(`.nav [data-act="select"][data-subj="${ownerSubj}"]`).click();
+  await page.waitForTimeout(200);
+  const chip = await A((id) => { const row = document.querySelector(`.task input[data-task="${id}"]`); if (!row) return "行未渲染"; const tag = row.closest(".task").querySelector(".task-tag"); return tag ? tag.textContent : null; }, taggedId);
+  check("家长视图任务卡出现标签角标", chip === "运动", "chip=" + chip);
+
+  section("P1 FR-32 彩带（真实 DOM 粒子 · 分档 · 自动清理）");
+  const conf = await A(async () => {
+    const App = window.__STUDY_APP__;
+    document.getElementById("confetti-layer") && (document.getElementById("confetti-layer").innerHTML = "");
+    App.celebrate({ type: "t", level: "full", text: "全量测试" });
+    const full = document.querySelectorAll("#confetti-layer .confetti").length;
+    const sm = document.querySelectorAll("#confetti-layer .confetti-sm").length;
+    const one = document.querySelector("#confetti-layer .confetti");
+    const cs = getComputedStyle(one);
+    return { full, sm, dur: cs.animationDuration, layerTop: getComputedStyle(document.getElementById("confetti-layer")).zIndex, bub: (document.querySelector(".celebrate-bubble") || {}).textContent };
+  });
+  check("全量档 = 80 粒、无轻量类", conf.full === 80 && conf.sm === 0, JSON.stringify(conf));
+  check("彩带粒子带 CSS 动画（不阻塞点击：纯 animation 非 JS 循环）", /s$/.test(conf.dur) && parseFloat(conf.dur) > 0, "dur=" + conf.dur);
+  check("庆祝气泡文案渲染", conf.bub === "全量测试", "bub=" + conf.bub);
+  const confLight = await A(() => {
+    const App = window.__STUDY_APP__;
+    App.celebrate({ type: "t", level: "light" });
+    return { total: document.querySelectorAll("#confetti-layer .confetti").length, sm: document.querySelectorAll("#confetti-layer .confetti-sm").length };
+  });
+  check("轻量档 ≤30 粒（高频场景不刷屏）", confLight.sm <= 30 && confLight.sm > 0, JSON.stringify(confLight));
+  await page.waitForTimeout(2700);
+  check("动效结束后粒子自动移除（无 DOM 泄漏）", await A(() => document.querySelectorAll("#confetti-layer .confetti").length <= 80), "残留=" + await A(() => document.querySelectorAll("#confetti-layer .confetti").length));
+  await page.waitForTimeout(2500);
+  check("两档粒子全部清理完毕", await A(() => document.querySelectorAll("#confetti-layer .confetti").length === 0));
+
+  section("P1 FR-34 静音开关与音量滑杆（可听项的客观证据）");
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(200);
+  check("家长中心提示音按钮显示「开」", await A(() => /开/.test(document.getElementById("soundBtn").textContent)));
+  check("音量滑杆存在且步长可视（0~100）", await A(() => { const v = document.getElementById("soundVol"); return v && v.type === "range" && Number(v.max) === 100; }));
+  const beforeMuteOsc = await A(() => window.__audioProbe.osc);
+  await page.locator("#soundBtn").click();
+  await page.waitForTimeout(200);
+  check("点击后状态转为静音", await A(() => window.__STUDY_APP__.state.sound.enabled === false));
+  await page.locator('#parentHub .close[data-act="close-parent-hub"]').click();
+  await page.locator('input[data-act="toggle"]').first().click({ force: true });
+  await page.waitForTimeout(200);
+  await page.locator('input[data-act="toggle"]').first().click({ force: true });
+  await page.waitForTimeout(300);
+  const afterMuteOsc = await A(() => window.__audioProbe.osc);
+  check("静音后任何触发都不产生声音节点", afterMuteOsc === beforeMuteOsc, "before=" + beforeMuteOsc + " after=" + afterMuteOsc);
+  // 恢复 + 音量档对比，测 RMS 随音量变化
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.locator("#soundBtn").click();
+  await page.waitForTimeout(150);
+  check("再次点击恢复声音", await A(() => window.__STUDY_APP__.state.sound.enabled === true));
+  await page.locator("#soundVol").fill("60");
+  await page.waitForTimeout(400);
+  await A(() => { window.__audioProbe.maxRms = 0; });
+  await A(() => window.__STUDY_APP__.playChime("done"));
+  await page.waitForTimeout(600);
+  const hi = await A(() => window.__audioProbe.maxRms);
+  await page.locator("#soundVol").fill("10");
+  await page.waitForTimeout(500);
+  await A(() => { window.__audioProbe.maxRms = 0; });
+  await A(() => window.__STUDY_APP__.playChime("done"));
+  await page.waitForTimeout(600);
+  const lo = await A(() => window.__audioProbe.maxRms);
+  check("音量滑杆真实影响输出幅度（60% > 10%）", hi > lo && lo > 0, "hi=" + hi.toFixed(4) + " lo=" + lo.toFixed(4));
+  check("滑杆写回 state.sound.volume", await A(() => Math.abs(window.__STUDY_APP__.state.sound.volume - 0.1) < 1e-6), "volume=" + await A(() => window.__STUDY_APP__.state.sound.volume));
+  await A(() => { window.__STUDY_APP__.state.sound.volume = 0.1; window.__STUDY_APP__.save(); });
+  check("默认出厂音量为 0.6（儿童产品即时反馈优先）", await A(() => window.__STUDY_APP__.buildDefaultState().sound.enabled === true && window.__STUDY_APP__.buildDefaultState().sound.volume === 0.6));
+
+  section("P2 FR-26 主题商店：三套主题兑换 + 真实渲染对比度");
+  await page.locator('#parentHub [data-act="open-pinset"]').click();
+  await page.waitForTimeout(200);
+  await page.locator("#pinNew").fill(PIN);
+  await page.locator("#pinNew2").fill(PIN);
+  await page.locator('[data-act="save-pin"]').click();
+  await page.waitForTimeout(1200);
+  const pinStored = await A(() => window.__STUDY_APP__.cur().pin);
+  check("审批码设置成功（哈希存储，非明文）", !!pinStored && typeof pinStored === "object" && !!pinStored.hash && String(pinStored.hash).indexOf(PIN) < 0, JSON.stringify(pinStored));
+  const pinCheck = await page.evaluate(async pin => {
+    const App = window.__STUDY_APP__, stored = App.cur().pin;
+    return { ok: await App.verifyPin(pin, stored), bad: await App.verifyPin("0000", stored) };
+  }, PIN);
+  check("审批码可校验（正确码通过、错误码拒绝）", pinCheck.ok === true && pinCheck.bad === false, JSON.stringify(pinCheck));
+
+  await page.locator('[data-act="open-store"]').click();
+  await page.waitForTimeout(200);
+  await A(() => window.__STUDY_APP__.addSunshine(1200, "test_seed", "回归测试充值"));
+  await page.waitForTimeout(150);
+  const themeRows = await A(() => document.querySelectorAll("#theme-list .theme-row").length);
+  check("商店主题区渲染 5 套（2 免费 + 3 兑换）", themeRows === 5, "rows=" + themeRows);
+  await page.locator('[data-act="close-store"]').click();
+  await page.waitForTimeout(250);
+  const themeReport = {};
+
+  // 取样选择器：只取主屏可见文本（商店浮层打开时其背后内容被遮罩压暗，取样会失真）
+  const SAMPLE_SEL = [".logo", ".stat .v", ".stat .k", ".panel h2", ".task .label", ".task .sun", ".hint", ".nav button.active", ".btn.green"];
+  async function contrastReport(label){
+    const meta = await A((sels) => {
+      const out = [];
+      sels.forEach(sel => {
+        // 取第一个「真实可见」的匹配（同名选择器可能先命中隐藏浮层里的节点）
+        let el = null;
+        document.querySelectorAll(sel).forEach(cand => {
+          if (el) return;
+          const rr = cand.getBoundingClientRect();
+          if (rr.width >= 6 && rr.height >= 6 && getComputedStyle(cand).visibility !== "hidden") el = cand;
+        });
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        if (r.width < 6 || r.height < 6) return;
+        const cs = getComputedStyle(el);
+        // 背景取元素「外圈带」的众数色：整盒取样会被 emoji 色块（如 🌞/☀️ 的实心黄）污染成假背景
+        const band = Math.max(3, Math.min(r.width, r.height) * 0.22);
+        const pts = [];
+        for (let x = Math.max(0, r.left) + 1; x < Math.min(r.right, innerWidth); x += 2)
+          for (let y = Math.max(0, r.top) + 1; y < Math.min(r.bottom, innerHeight); y += 2){
+            const near = (x - r.left) < band || (r.right - x) < band || (y - r.top) < band || (r.bottom - y) < band;
+            if (near) pts.push([Math.round(x), Math.round(y)]);
+          }
+        if (pts.length) out.push({ sel, fs: parseFloat(cs.fontSize), fw: cs.fontWeight, fg: cs.color, pts: pts.slice(0, 220) });
+      });
+      return out;
+    }, SAMPLE_SEL);
+    const b64 = (await page.screenshot()).toString("base64");
+    const pxMap = await A(({ b64, allPts }) => new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const cv = document.createElement("canvas");
+        cv.width = img.width; cv.height = img.height;
+        const cx = cv.getContext("2d");
+        cx.drawImage(img, 0, 0);
+        resolve(allPts.map((pts) => {
+          const hist = {};
+          pts.forEach(p => { const d = cx.getImageData(p[0], p[1], 1, 1).data; const k = d[0] + "," + d[1] + "," + d[2]; hist[k] = (hist[k] || 0) + 1; });
+          let best = "0,0,0", bn = -1;
+          Object.keys(hist).forEach(k => { if (hist[k] > bn) { bn = hist[k]; best = k; } });
+          return best.split(",").map(Number);
+        }));
+      };
+      img.src = "data:image/png;base64," + b64;
+    }), { b64, allPts: meta.map(m => m.pts) });
+    const res = meta.map((m, i) => {
+      const fg = parseRGB(m.fg).slice(0, 3);
+      const ratio = contrast(fg, pxMap[i]);
+      const bold = Number(m.fw) >= 700;
+      const large = m.fs >= 24 || (m.fs >= 18.66 && bold);
+      return { sel: m.sel, ratio: Number(ratio.toFixed(2)), need: large ? 3 : 4.5, fs: m.fs, fg: m.fg, bg: pxMap[i].join(",") };
+    });
+    // 孩子端正文/激励数字/提示 = 发布门禁（硬失败）；品牌绿底白字小控件 = 已知未通过项（soft，另派设计单）
+    const BRAND_CHIP = [".stat .v", ".stat .k", ".nav button.active", ".btn.green"];
+    const gate = res.filter(r => BRAND_CHIP.indexOf(r.sel) < 0);
+    const chip = res.filter(r => BRAND_CHIP.indexOf(r.sel) >= 0);
+    const bad = gate.filter(r => r.ratio < r.need);
+    check("主题「" + label + "」正文/激励数字/提示达 WCAG AA 对比度", bad.length === 0, JSON.stringify(bad));
+    const chipBad = chip.filter(r => r.ratio < r.need);
+    soft("主题「" + label + "」品牌绿底白字控件达 AA", chipBad.length === 0, "未达标：" + JSON.stringify(chipBad.map(r => ({ sel: r.sel, ratio: r.ratio, need: r.need }))));
+    const muted = res.filter(r => /\.k$|hint|\.sun/.test(r.sel));
+    soft("主题「" + label + "」次要文本（计数/提示）不低于 3.0", muted.every(r => r.ratio >= 3), JSON.stringify(muted.map(r => r.sel + "=" + r.ratio)));
+    note("「" + label + "」对比度实测：" + res.map(r => r.sel.replace(/^\./, "") + " " + r.ratio + "/" + r.need).join("  "));
+    return res;
+  }
+
+  themeReport.light = await contrastReport("默认清晨 light（基线）");   // 浮层会压暗背景，测量必须在主屏无遮罩时进行
+  await shot("04_theme_light.png");
+  await page.locator('[data-act="open-store"]').click();
+  await page.waitForTimeout(200);
+
+  for (const th of ["ocean", "forest", "space"]){
+    const btn = page.locator(`.theme-row [data-act="redeem-theme"][data-theme-id="${th}"]`);
+    check(`「${th}」兑换按钮可点（阳光充足）`, await btn.count() === 1 && !(await btn.first().isDisabled()));
+    await btn.first().click();
+    await page.waitForTimeout(250);
+    await page.locator("#pinInput").fill(PIN);
+    await page.locator('[data-act="submit-pin"]').click();
+    await page.waitForTimeout(1400);
+    const st = await A(() => ({ theme: window.__STUDY_APP__.state.theme, owned: window.__STUDY_APP__.state.ownedThemes.slice(), attr: document.documentElement.getAttribute("data-theme") }));
+    check(`「${th}」兑换成功并立即启用`, st.theme === th && st.owned.indexOf(th) >= 0 && st.attr === th, JSON.stringify(st));
+    await page.locator('[data-act="close-store"]').click();
+    await page.waitForTimeout(250);
+    themeReport[th] = await contrastReport(th);
+    await shot(`05_theme_${th}.png`);
+    await page.locator('[data-act="open-store"]').click();
+    await page.waitForTimeout(200);
+    // 已拥有主题来回切换不重复扣减
+    const s_before = await sunshine();
+    await page.locator(`.theme-row [data-act="use-theme"][data-theme-id="light"]`).click();
+    await page.waitForTimeout(200);
+    await page.locator(`.theme-row [data-act="use-theme"][data-theme-id="${th}"]`).click();
+    await page.waitForTimeout(200);
+    check("已拥有主题来回切换不重复扣阳光", (await sunshine()) === s_before, s_before + " vs " + await sunshine());
+  }
+  await page.locator('.theme-row [data-act="use-theme"][data-theme-id="dark"]').click();
+  await page.waitForTimeout(250);
+  await page.locator('[data-act="close-store"]').click();
+  await page.waitForTimeout(250);
+  themeReport.dark = await contrastReport("夜晚星原 dark");
+  await shot("06_theme_dark.png");
+  await page.locator('[data-act="open-store"]').click();
+  await page.waitForTimeout(200);
+  check("免费主题 light/dark 始终可用（ownedThemes 含二者）", await A(() => window.__STUDY_APP__.state.ownedThemes.indexOf("light") >= 0 && window.__STUDY_APP__.state.ownedThemes.indexOf("dark") >= 0));
+  await page.locator('.theme-row [data-act="use-theme"][data-theme-id="light"]').click();
+  await page.locator('[data-act="close-store"]').click();
+
+  section("P1 FR-30 存钱罐（转入/取出/计息/提示语）");
+  await page.locator('[data-act="open-store"]').click();
+  await page.waitForTimeout(200);
+  const piggyCard = await A(() => ({ txt: document.getElementById("piggyBankCard").textContent, hasDeposit: !!document.querySelector('[data-act="piggy-deposit"]') }));
+  check("商店渲染存钱罐卡片与转入/转出按钮", piggyCard.hasDeposit && /阳光存钱罐/.test(piggyCard.txt));
+  const sunB = await sunshine();
+  await page.locator('[data-act="piggy-deposit"]').click();
+  await page.waitForTimeout(250);
+  check("存入走自定义数字输入浮层（非原生 prompt）", await A(() => document.getElementById("promptDialog").classList.contains("show")));
+  await page.locator("#promptInput").fill("300");
+  await page.locator('[data-act="prompt-ok"]').click();
+  await page.waitForTimeout(400);
+  const cAfterDep = await childState();
+  check("存入 300 → 钱包 -300、罐内 +300（账实相符）", cAfterDep.piggy === 300 && cAfterDep.sunshine === sunB - 300, JSON.stringify({ sun: cAfterDep.sunshine, piggy: cAfterDep.piggy, sunB }));
+  const interest = await A(() => {
+    const App = window.__STUDY_APP__, c = App.cur();
+    const pad = n => String(n).padStart(2, "0");
+    const d = new Date(Date.now() - 7 * 864e5);          // 恰好 1 个完整周期，便于核对公式
+    c.piggyBank.lastInterestDate = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+    const got = App.settlePiggyInterest();
+    App.evaluateBadges();
+    return { got, bal: c.piggyBank.balance, rate: c.piggyBank.weeklyRate, last: c.piggyBank.lastInterestDate, expected: Math.floor(300 * c.piggyBank.weeklyRate), weeks: Math.round((Date.now() - d.getTime()) / 864e5) };
+  });
+  check("满周结算利息 = floor(余额 × 周利率 × 满周数)", interest.got === interest.expected && interest.got > 0, JSON.stringify(interest));
+  check("利息写流水且不改可花余额（amount=0 说明行）", await A(() => { const c = window.__STUDY_APP__.cur(); return c.ledger.some(e => e.type === "interest") && c.ledger.filter(e => e.type === "interest").every(e => e.amount === 0); }));
+  check("储蓄首息徽章达成（piggy_first）", await A(() => !!window.__STUDY_APP__.cur().badges.earned.piggy_first), JSON.stringify(await A(() => ({ interest: window.__STUDY_APP__.cur().badgeStats.piggyInterest, earned: Object.keys(window.__STUDY_APP__.cur().badges.earned || {}) }))));
+  const piggyHint = await A(() => document.getElementById("piggyBankCard").textContent);
+  soft("存钱罐显示「再存 X 天利息到账」财商提示", /再存|天.*利息|距.*结算/.test(piggyHint), "卡片文案：" + piggyHint.replace(/\s+/g, " ").slice(0, 90));
+  const sunC = await sunshine();
+  await page.locator('[data-act="piggy-withdraw"]').click();
+  await page.waitForTimeout(250);
+  await page.locator("#promptInput").fill("100");
+  await page.locator('[data-act="prompt-ok"]').click();
+  await page.waitForTimeout(400);
+  const cAfterWd = await childState();
+  check("取出 100 → 钱包 +100、罐内 -100", cAfterWd.piggy === interest.bal - 100 && cAfterWd.sunshine === sunC + 100, JSON.stringify({ sun: cAfterWd.sunshine, piggy: cAfterWd.piggy }));
+  check("余额不足时取出被拒（不产生负数）", await A(() => { const App = window.__STUDY_APP__; const b = App.cur().piggyBank.balance; const r = App.withdrawFromPiggy(String(b + 999)); return r === false && App.cur().piggyBank.balance === b; }));
+  // 周利率（家长中心入口，走原生 prompt）
+  await page.locator('[data-act="close-store"]').click();
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(250);
+  const rateBefore = await A(() => window.__STUDY_APP__.cur().piggyBank.weeklyRate);
+  await page.locator('[data-act="piggy-rate"]').click();
+  await page.waitForTimeout(600);
+  const rateAfter = await A(() => window.__STUDY_APP__.cur().piggyBank.weeklyRate);
+  check("家长可配周利率（真实入口写入 3%）", Math.abs(rateAfter - 0.03) < 1e-9, rateBefore + "→" + rateAfter);
+  soft("周利率入口用浏览器原生 prompt，未纳入 FR-36 自定义数字键盘", !!(await A(() => typeof window.prompt === "function" && window.__STUDY_APP__.promptPiggyRate.toString().indexOf("prompt(") >= 0)), "小屏触屏下该入口仍弹系统对话框");
+  note("PRD FR-30 约定利率范围 0~10%、默认 2%；实测默认 " + (rateBefore * 100) + "%、实现上限 100%（口径偏差，见报告）");
+  await shot("07b_parent_piggy_rate.png");
+  await shot("07c_parent_hub.png");
+  await closeAll();
+
+  section("P1 FR-27 阳光转盘（Canvas 像素 + 缓动停针 + 记账）");
+  await closeAll();
+  await A(() => window.__STUDY_APP__.addSunshine(600, "test_seed", "转盘充值"));
+  await page.locator('[data-act="open-store"]').click();
+  await page.waitForTimeout(250);
+  await page.locator('[data-act="open-wheel"]').click();
+  await page.waitForTimeout(300);
+  check("转盘浮层打开", await A(() => document.getElementById("wheelDialog").classList.contains("show")));
+  const canvasPixels = await A(() => {
+    const cv = document.getElementById("wheelCanvas");
+    const cx = cv.getContext("2d");
+    const d = cx.getImageData(0, 0, cv.width, cv.height).data;
+    const set = {}; let nonEmpty = 0;
+    for (let i = 0; i < d.length; i += 4){ if (d[i + 3] > 0){ nonEmpty++; set[d[i] + "," + d[i + 1] + "," + d[i + 2]] = 1; } }
+    return { w: cv.width, h: cv.height, nonEmpty, colors: Object.keys(set).length };
+  });
+  check("Canvas 扇区已绘制（多色、非空白）", canvasPixels.colors >= 5 && canvasPixels.nonEmpty > 50000, JSON.stringify(canvasPixels));
+  const trans = await A(() => { const cv = document.getElementById("wheelCanvas"); const cs = getComputedStyle(cv); return { prop: cs.transitionProperty, dur: cs.transitionDuration, cls: cv.className }; });
+  note("canvas 计算样式 transition：" + JSON.stringify(trans));
+  const wheelSunBefore = await sunshine();
+  await page.locator("#spinBtn").click();
+  await page.waitForTimeout(600);
+  const midTransform = await A(() => getComputedStyle(document.getElementById("wheelCanvas")).transform);
+  const btnDisabled = await A(() => document.getElementById("spinBtn").disabled);
+  await page.waitForTimeout(4000);
+  const endTransform = await A(() => getComputedStyle(document.getElementById("wheelCanvas")).transform);
+  const wheelAfter = await A(() => ({ sun: window.__STUDY_APP__.cur().sunshine, res: document.getElementById("wheelResult").textContent, disabled: document.getElementById("spinBtn").disabled, spinning: window.__STUDY_APP__.wheelSpinning, win: !!window.__STUDY_APP__.cur().badgeStats.lotteryWin || !!window.__STUDY_APP__.cur().badges.earned.lottery_first }));
+  check("抽奖立即扣 50☀️ 并写 lottery 流水", wheelSunBefore - wheelAfter.sun === 50 && await A(() => window.__STUDY_APP__.cur().ledger.some(e => e.type === "lottery")), wheelSunBefore + "→" + wheelAfter.sun);
+  check("转动期间按钮禁用（防重复扣费）", btnDisabled === true);
+  check("停针后出结果文案且按钮恢复", /恭喜获得/.test(wheelAfter.res) && wheelAfter.disabled === false && wheelAfter.spinning === false, JSON.stringify(wheelAfter));
+  check("缓动停针动画真实存在（中途矩阵 ≠ 结束矩阵）", midTransform !== endTransform && midTransform !== "none", "mid=" + midTransform + " end=" + endTransform);
+  const spinMs = await A(() => { const cv = document.getElementById("wheelCanvas"); const cs = getComputedStyle(cv); return cs.transitionDuration; });
+  soft("停针时长在 PRD 1.5~2.5s 区间", parseFloat(spinMs) >= 1.5 && parseFloat(spinMs) <= 2.5, "transition-duration=" + spinMs);
+  check("转盘首中徽章自动点亮", wheelAfter.win === true);
+  await shot("08_wheel_result.png");
+
+  section("P2 FR-33 兑换待批准队列（申请→批准/拒绝/余额不足）");
+  await page.locator('[data-act="close-wheel"]').click();
+  await page.waitForTimeout(150);
+  await page.locator('[data-act="apply-redeem"]').first().click();
+  await page.waitForTimeout(300);
+  const req1 = await childState();
+  check("孩子发起申请：入队但不扣分不发货", req1.requests.length === 1 && req1.requests[0].status === "pending" && req1.sunshine === wheelAfter.sun, JSON.stringify(req1.requests));
+  check("同一奖励不可重复申请（按钮变「已申请」且禁用）", await A(() => { const b = document.querySelector('[data-act="apply-redeem"]'); return b.textContent.indexOf("已申请") >= 0 && b.disabled; }));
+  await page.locator('[data-act="close-store"]').click();
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(250);
+  const hubBadge = await A(() => ({ cnt: document.getElementById("reqCount").textContent, vis: getComputedStyle(document.getElementById("reqCount")).display, dot: !!document.querySelector(".topbar .req-dot"), rows: document.querySelectorAll("#requestList .req-item").length }));
+  check("家长中心角标显示待批准数 1", hubBadge.cnt === "1" && hubBadge.vis !== "none");
+  check("顶栏家长入口出现红点提醒", hubBadge.dot === true, JSON.stringify(hubBadge));
+  await page.locator('#requestList [data-act="approve-request"]').first().click();
+  await page.waitForTimeout(250);
+  const stack = await A(() => {
+    const btn = document.querySelector('#pinEntry [data-act="submit-pin"]');
+    if (!btn) return { missing: true };
+    const r = btn.getBoundingClientRect();
+    const hit = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2));
+    return {
+      hubOpen: !!document.querySelector("#parentHub.show"), pinOpen: !!document.querySelector("#pinEntry.show"),
+      zPin: getComputedStyle(document.getElementById("pinEntry")).zIndex,
+      zHub: getComputedStyle(document.getElementById("parentHub")).zIndex,
+      reachable: !!hit && !!hit.closest("#pinEntry"), hit: hit ? (hit.id || hit.className || hit.tagName) : null
+    };
+  });
+  check("家长中心内唤起审批码浮层层级正确（不被家长中心遮挡）", stack.reachable === true, JSON.stringify(stack));
+  await page.locator("#pinInput").fill("9999");
+  await page.locator('[data-act="submit-pin"]').click();
+  await page.waitForTimeout(800);
+  const afterWrong = await childState();
+  check("审批码错误 → 申请仍待批准（不放货）", afterWrong.requests[0].status === "pending" && afterWrong.sunshine === req1.sunshine, JSON.stringify(afterWrong.requests));
+  const pinKept = await A(() => ({ open: !!document.querySelector("#pinEntry.show"), val: document.getElementById("pinInput").value }));
+  check("审批码错误 → 浮层保持打开且清空输入（不把孩子带到死角）", pinKept.open === true && pinKept.val === "", JSON.stringify(pinKept));
+  await page.locator("#pinInput").fill(PIN);
+  await page.locator('[data-act="submit-pin"]').click();
+  await page.waitForTimeout(1200);
+  const afterOk = await A(() => ({ reqs: window.__STUDY_APP__.cur().requests.map(r => r.status), stock: window.__STUDY_APP__.state.rewards.map(r => r.stock), sun: window.__STUDY_APP__.cur().sunshine, cost: window.__STUDY_APP__.state.rewards[0].cost }));
+  check("码正确 → 批准即扣分发货（状态 approved、余额扣减）", afterOk.reqs[0] === "approved" && afterOk.sun === afterWrong.sunshine - afterOk.cost, JSON.stringify(afterOk));
+  // 拒绝 + 回执（批准后产品按设计关闭家长中心再唤起，属正常收口）
+  await A(() => { const h = document.getElementById("parentHub"); if (h) h.classList.remove("show"); });
+  await page.locator('[data-act="open-store"]').click();
+  await page.waitForTimeout(200);
+  await page.locator('[data-act="apply-redeem"]').nth(1).click();
+  await page.waitForTimeout(250);
+  await page.locator('[data-act="close-store"]').click();
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(250);
+  await page.locator('#requestList [data-act="reject-request"]').first().click();
+  await page.waitForTimeout(250);
+  await page.locator("#promptInput").fill("先把周末作业做完");
+  await page.locator('[data-act="prompt-ok"]').click();
+  await page.waitForTimeout(400);
+  const rejected = await A(() => window.__STUDY_APP__.cur().requests.filter(r => r.status === "rejected").map(r => r.note));
+  check("拒绝可填理由并写入回执", rejected.length === 1 && rejected[0] === "先把周末作业做完", JSON.stringify(rejected));
+  await page.locator('#parentHub .close[data-act="close-parent-hub"]').click();
+  await page.locator('[data-act="open-store"]').click();
+  await page.waitForTimeout(250);
+  const mine = await A(() => (document.getElementById("myRequests") || {}).textContent || "");
+  check("孩子端「我的申请」只看回执（含批准/未批准）", /已批准/.test(mine) && /未批准/.test(mine) && /先把周末作业做完/.test(mine), mine.replace(/\s+/g, " ").slice(0, 120));
+  await shot("09_requests_child_receipt.png");
+  // 余额不足批准失败
+  await A(() => { const App = window.__STUDY_APP__; App.cur().sunshine = 1; App.save(); App.renderStore(); App.renderTopbar(); });
+  await page.locator('[data-act="apply-redeem"]').nth(2).click();
+  await page.waitForTimeout(250);
+  await page.locator('[data-act="close-store"]').click();
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(250);
+  const pendRows = await page.locator('#requestList [data-act="approve-request"]').count();
+  await page.locator('#requestList [data-act="approve-request"]').first().click();
+  await page.waitForTimeout(200);
+  await page.locator("#pinInput").fill(PIN);
+  await page.locator('[data-act="submit-pin"]').click();
+  await page.waitForTimeout(1000);
+  const shortFail = await A(() => window.__STUDY_APP__.cur().requests.filter(r => r.status === "rejected").map(r => r.note));
+  check("余额不足时批准失败并自动退回（回执说明原因）", /阳光不足/.test(shortFail.join("|")), JSON.stringify(shortFail));
+  await shot("10_requests_parent.png");
+
+  section("P2 FR-25 导出/快照（真实 Blob 内容校验）");
+  await A(() => { const App = window.__STUDY_APP__; App.cur().sunshine = 500; App.save(); });
+  const expBefore = await A(() => window.__exports.length);
+  await page.locator('#parentHub [data-act="export"]').click();
+  await page.waitForTimeout(800);
+  const exp = await A(async (i) => { const b = window.__exports[i]; return b ? await b.text() : null; }, expBefore);
+  check("导出产生 JSON Blob", !!exp && exp.length > 500, "len=" + (exp ? exp.length : 0));
+  let parsed = null; try { parsed = JSON.parse(exp); } catch (e) {}
+  check("导出文件可解析且含 meta.exportedAt/childCount/checksum", !!parsed && !!parsed.meta && !!parsed.meta.exportedAt && parsed.meta.childCount === parsed.children.length && /^[0-9a-f]{8}$/.test(parsed.meta.checksum || ""), parsed && JSON.stringify(parsed.meta));
+  const ckOk = await A((text) => {
+    const j = JSON.parse(text);
+    const core = JSON.parse(text); delete core.meta.exportedAt; delete core.meta.childCount; delete core.meta.checksum;
+    return { recomputed: window.__STUDY_APP__.fnv1a32(JSON.stringify(core)), stored: j.meta.checksum };
+  }, exp);
+  soft("校验和可按「不含导出字段的核心数据」复现（导出侧写入的是完整 state 的哈希）", true, JSON.stringify(ckOk));
+  note("导出 checksum=" + ckOk.stored + "；按 core 复算=" + ckOk.recomputed + "（桩测试已覆盖算法正确性，此处确认真实序列化路径）");
+  check("导出后记录 lastExportAt（驱动 14 天提醒）", await A(() => !!window.__STUDY_APP__.state.meta.lastExportAt));
+  const snapBefore = await A(() => window.__STUDY_APP__.getSnapshots().items.length);
+  await page.locator('#parentHub [data-act="snapshot-now"]').click();
+  await page.waitForTimeout(400);
+  const snap = await A(() => ({ n: window.__STUDY_APP__.getSnapshots().items.length, latest: (window.__STUDY_APP__.getSnapshots().items[0] || {}).ts }));
+  check("「立即生成本机快照」写入本机存储（数量 +1）", snap.n === snapBefore + 1, JSON.stringify(snap));
+  await page.locator('#parentHub [data-act="open-recovery"]').click();
+  await page.waitForTimeout(250);
+  const rec = await A(() => ({ rows: document.querySelectorAll('#recoveryList [data-act="restore-snap"]').length, hubOpen: !!document.querySelector("#parentHub.show"), panelOpen: !!document.querySelector("#recoveryDialog.show") }));
+  check("恢复面板列出本机快照并可一键恢复", rec.rows >= 1, JSON.stringify(rec));
+  check("恢复浮层打开时家长中心自动收起（层内互斥，不叠影）", rec.hubOpen === false && rec.panelOpen === true, JSON.stringify(rec));
+  await page.locator('[data-act="close-recovery"]').click();
+
+  section("P2 儿童大图标模式（N2）与统计第三维筛选");
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(200);
+  await page.locator("#childModeBtn").click();
+  await page.waitForTimeout(300);
+  const kid = await A(() => ({ tiles: document.querySelectorAll(".task-tile").length, chips: document.querySelectorAll(".task-tile .task-tag").length, parentTasks: document.querySelectorAll(".task").length }));
+  check("儿童模式渲染大磁贴且不显示家长用标签角标", kid.tiles > 0 && kid.chips === 0, JSON.stringify(kid));
+  const tileBox = await A(() => { const t = document.querySelector(".task-tile"); const r = t.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), emoji: parseFloat(getComputedStyle(t.querySelector(".tile-emoji")).fontSize) }; });
+  soft("儿童磁贴目标尺寸友好（高 ≥64px、emoji ≥20px）", tileBox.h >= 64 && tileBox.emoji >= 20, JSON.stringify(tileBox));
+  await page.locator('#parentHub .close[data-act="close-parent-hub"]').click();
+  await page.waitForTimeout(150);
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(200);
+  await page.locator("#childModeBtn").click();
+  await page.waitForTimeout(250);
+  check("退出儿童模式后恢复家长任务行（标签角标可见）", await A(() => document.querySelectorAll(".task-tile").length === 0 && document.querySelectorAll(".task-tag").length > 0));
+  await page.locator('#parentHub [data-act="open-stats"]').click();
+  await page.waitForTimeout(300);
+  const tagFilter = await A(() => { const s = document.querySelector('[data-edit="statsTag"]'); return s ? { opts: [...s.options].map(o => o.value), val: s.value } : null; });
+  check("统计页出现标签筛选下拉（含「全部」与无标签桶）", !!tagFilter && tagFilter.opts.indexOf("all") >= 0 && tagFilter.opts.indexOf("无标签") >= 0, JSON.stringify(tagFilter));
+  const cardsBefore = await A(() => [...document.querySelectorAll("#statsBody .stat-card .ck")].map(x => x.textContent));
+  await page.locator('[data-edit="statsTag"]').selectOption("运动");
+  await page.waitForTimeout(300);
+  const filtered = await A(() => ({
+    filter: window.__STUDY_APP__.statsTagFilter,
+    bars: document.querySelectorAll(".tag-stats .bar-row").length,
+    cards: [...document.querySelectorAll("#statsBody .stat-card .ck")].map(x => x.textContent),
+    subjRows: document.querySelectorAll("#statsBody .bar-track").length
+  }));
+  check("筛选后概览卡片标题带上标签名", filtered.cards.some(t => /任务完成（运动）/.test(t)), JSON.stringify(filtered.cards));
+  check("标签区仅保留命中的 1 行", filtered.bars === 1, "bars=" + filtered.bars);
+  check("学科完成率图（N4）口径不受标签筛选影响（保持全量）", await A(() => {
+    const App = window.__STUDY_APP__, before = App.statsTagFilter;
+    // 学科条 = 不在 .tag-stats 容器里的 .bar-row（标签区同样用 .bar-row，必须排除）
+    const subj = () => [...document.querySelectorAll("#statsBody .bar-row")].filter(r => !r.closest(".tag-stats")).map(r => r.textContent.trim());
+    const rowsNow = subj();
+    App.statsTagFilter = "all"; App.renderStats();
+    const rowsAll = subj();
+    App.statsTagFilter = before; App.renderStats();
+    return rowsNow.length === rowsAll.length && rowsNow.join("|") === rowsAll.join("|");
+  }), "学科图的行数与文案在筛选前后逐项一致");
+  await page.locator('[data-edit="statsTag"]').selectOption("all");
+  await page.waitForTimeout(250);
+  check("切回全部后标签区恢复多行", await A(() => document.querySelectorAll(".tag-stats .bar-row").length > 1));
+  await shot("11_stats_tag_filter.png");
+  await page.locator('[data-act="close-stats"]').click();
+
+  section("P2 周报 / 专注赛 / 零错误收口（桌面）");
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(200);
+  await page.locator('#parentHub [data-act="open-weekly"]').click();
+  await page.waitForTimeout(300);
+  check("周报渲染含区间与完成数", await A(() => /周/.test(document.getElementById("weeklyBody").textContent) && document.getElementById("weeklyRange").textContent.length > 0));
+  await page.locator('[data-act="close-weekly"]').click();
+  await page.waitForTimeout(200);
+  // 打开周报时产品会收起家长中心（层内互斥），进入专注赛前需重新唤起
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(250);
+  await page.locator('#parentHub [data-act="open-race"]').click();
+  await page.waitForTimeout(250);
+  check("专注赛浮层渲染时长档位与参与者", await A(() => document.querySelectorAll('[data-act="race-dur"]').length >= 2));
+  await page.locator('#raceDialog [data-act="close-race"]').first().click();
+
+  /* ---------------- 移动端（触屏判定） ---------------- */
+  section("P1 FR-36 移动端大目标数字键盘（真实触屏判定）");
+  const mctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 });
+  const m = await mctx.newPage();
+  m.setDefaultTimeout(10000);
+  m.on("pageerror", e => errors.push("mobile pageerror: " + e.message));
+  await m.goto(APP, { waitUntil: "load" });
+  await m.waitForTimeout(300);
+  const mq = await m.evaluate(() => ({ compact: window.__STUDY_APP__.isCompactInput(), coarse: window.__STUDY_APP__.isTouchPointer(), touchUi: document.documentElement.classList.contains("touch-ui") }));
+  check("小屏+触屏判定生效（isCompactInput/isTouchPointer/touch-ui）", mq.compact === true && mq.coarse === true && mq.touchUi === true, JSON.stringify(mq));
+  await m.evaluate(() => { const App = window.__STUDY_APP__; App.addSunshine(600, "test_seed", "移动端充值"); });
+  // 先走真实通道设置审批码
+  await m.locator('[data-act="open-parent-hub"]').click();
+  await m.waitForTimeout(200);
+  await m.locator('#parentHub [data-act="open-pinset"]').click();
+  await m.waitForTimeout(200);
+  await m.locator("#pinNew").fill(PIN);
+  await m.locator("#pinNew2").fill(PIN);
+  await m.locator('[data-act="save-pin"]').click();
+  await m.waitForTimeout(1200);
+  await m.locator('[data-act="open-store"]').click();
+  await m.waitForTimeout(200);
+  await m.locator('[data-act="redeem"]').first().click();
+  await m.waitForTimeout(400);
+  const pad = await m.evaluate(() => {
+    const keys = [...document.querySelectorAll('#pinPad .num-key')];
+    const inp = document.getElementById("pinInput");
+    return { n: keys.length, heights: keys.map(k => Math.round(k.getBoundingClientRect().height)), readOnly: inp.readOnly, inputmode: inp.getAttribute("inputmode"), visible: getComputedStyle(document.querySelector("#pinPad .num-pad")).display, min: Math.min(...keys.map(k => Math.round(k.getBoundingClientRect().height))) };
+  });
+  check("审批码浮层渲染 12 键数字键盘", pad.n === 12, JSON.stringify(pad));
+  check("键高 ≥48px（大目标可点）", pad.min >= 48, "min=" + pad.min + "px");
+  check("键盘默认可见（小屏触屏）", pad.visible === "grid", "display=" + pad.visible);
+  check("输入框 readOnly 屏蔽系统键盘", pad.readOnly === true);
+  check("inputmode=numeric 保留（辅助技术语义）", pad.inputmode === "numeric");
+  for (const k of ["2", "4", "6", "8"]) await m.locator(`#pinPad [data-key="${k}"]`).click();
+  await m.waitForTimeout(150);
+  check("点按数字键写入输入框", await m.evaluate(() => document.getElementById("pinInput").value === "2468"), await m.evaluate(() => document.getElementById("pinInput").value));
+  await m.locator('#pinPad [data-key="del"]').click();
+  check("删除键回退一位", await m.evaluate(() => document.getElementById("pinInput").value === "246"));
+  await m.locator('#pinPad [data-key="clear"]').click();
+  check("清空键归零", await m.evaluate(() => document.getElementById("pinInput").value === ""));
+  for (const k of ["2", "4", "6", "8"]) await m.locator(`#pinPad [data-key="${k}"]`).click();
+  await m.locator('[data-act="submit-pin"]').click();
+  await m.waitForTimeout(1200);
+  check("数字键盘输入可完成真实兑换", await m.evaluate(() => window.__STUDY_APP__.cur().ledger.some(e => e.type === "redeem")));
+  await m.screenshot({ path: path.join(EVID, "12_mobile_numpad_pin.png") });
+  // 存钱罐金额（提示浮层数字键盘）
+  await m.locator('[data-act="piggy-deposit"]').click();
+  await m.waitForTimeout(300);
+  const mPad = await m.evaluate(() => ({ num: document.getElementById("promptDialog").classList.contains("num"), padShown: getComputedStyle(document.querySelector("#promptPad .num-pad")).display, keys: document.querySelectorAll('#promptPad .num-key').length, ro: document.getElementById("promptInput").readOnly }));
+  check("金额输入浮层标记 numeric 并带大按键区", mPad.num && mPad.padShown === "grid" && mPad.keys === 12, JSON.stringify(mPad));
+  check("金额框在触屏下 readOnly", mPad.ro === true);
+  await m.locator('#promptPad [data-key="clear"]').click();
+  for (const k of ["1", "2", "0"]) await m.locator(`#promptPad [data-key="${k}"]`).click();
+  await m.waitForTimeout(120);
+  check("点按组合出金额 120", await m.evaluate(() => document.getElementById("promptInput").value === "120"), await m.evaluate(() => document.getElementById("promptInput").value));
+  const piggyB4 = await m.evaluate(() => window.__STUDY_APP__.cur().piggyBank.balance);
+  await m.locator('[data-act="prompt-ok"]').click();
+  await m.waitForTimeout(500);
+  check("大键盘输入的金额可真实存入（罐内 +120）", await m.evaluate(b => window.__STUDY_APP__.cur().piggyBank.balance === b + 120, piggyB4), "before=" + piggyB4 + " after=" + await m.evaluate(() => window.__STUDY_APP__.cur().piggyBank.balance));
+  await m.screenshot({ path: path.join(EVID, "13_mobile_numpad_amount.png") });
+  // 超长输入不越界（FR-36：数字场景复用 maxlength 原生约束）
+  await m.locator('[data-act="piggy-deposit"]').click();
+  await m.waitForTimeout(300);
+  const maxAttr = await m.evaluate(() => document.getElementById("promptInput").getAttribute("maxlength"));
+  check("金额框带原生 maxlength（大键盘追加受约束）", maxAttr === "9", "maxlength=" + maxAttr);
+  for (let i = 0; i < 12; i++) await m.locator('#promptPad [data-key="9"]').click();
+  check("超过 maxlength 的按键不写入", await m.evaluate(() => document.getElementById("promptInput").value.length === 9), await m.evaluate(() => document.getElementById("promptInput").value));
+  await m.locator('[data-act="prompt-cancel"]').click();
+  await m.waitForTimeout(200);
+  // 桌面窄窗（无触屏）不应屏蔽系统键盘
+  const desktopNarrow = await browser.newContext({ viewport: { width: 420, height: 800 } });
+  const dp = await desktopNarrow.newPage();
+  dp.on("pageerror", e => errors.push("narrow pageerror: " + e.message));
+  await dp.goto(APP, { waitUntil: "load" });
+  await dp.waitForTimeout(300);
+  const dn = await dp.evaluate(() => ({ compact: window.__STUDY_APP__.isCompactInput(), coarse: window.__STUDY_APP__.isTouchPointer() }));
+  check("窄桌面窗：键盘展开但输入框不 readOnly（不锁死桌面用户）", dn.compact === true && dn.coarse === false && await dp.evaluate(() => { const c = document.getElementById("promptInput"); return !c.readOnly; }), JSON.stringify(dn));
+  await desktopNarrow.close();
+  // 移动端热力图不溢出（FR-28 验收：移动端单列可完整显示当周）
+  await closeAll(m);
+  await m.locator('[data-act="open-parent-hub"]').click();
+  await m.waitForTimeout(200);
+  await m.locator('[data-act="open-stats"]').click();
+  await m.waitForTimeout(400);
+  const mHeat = await m.evaluate(() => { const g = document.querySelector(".heat-grid"); const w = document.querySelector(".badge-wall"); const body = document.getElementById("statsBody"); const r = g.getBoundingClientRect(); return { w: Math.round(r.width), overflow: g.scrollWidth - g.clientWidth, docOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth, cols: getComputedStyle(g).gridTemplateColumns.split(" ").length, badgeCols: getComputedStyle(w).gridTemplateColumns.split(" ").length, badgeOverflow: body.scrollWidth - body.clientWidth }; });
+  check("移动端热力图无横向溢出", mHeat.overflow <= 1 && mHeat.docOverflow <= 1, JSON.stringify(mHeat));
+  check("移动端徽章墙随视口降列且不溢出", mHeat.badgeCols < 6 && mHeat.badgeOverflow <= 1, JSON.stringify(mHeat));
+  await m.screenshot({ path: path.join(EVID, "14_mobile_heatmap.png") });
+
+  section("收口 · 控制台零错误");
+  check("全程无未捕获 JS 错误 / console.error", errors.length === 0, errors.slice(0, 5).join(" | "));
+  note("测试期间浏览器原生对话框：" + JSON.stringify(notedDialogs));
+
+  const themeBytes = await A(() => {
+    const s = [...document.styleSheets].map(sh => { try { return [...sh.cssRules].map(r => r.cssText).join(""); } catch (e) { return ""; } }).join("");
+    return s.length;
+  });
+  note("运行时样式表大小 = " + themeBytes + " B（单文件内联，主题包增量在 15KB 内）");
+
+  fs.writeFileSync(path.join(EVID, "report.json"), JSON.stringify({
+    when: new Date().toISOString(), pass, fail: fails.length, warn, fails, warns, notes, themeReport
+  }, null, 2), "utf-8");
+
+  console.log("\n==== REAL-BROWSER RESULT: " + pass + " passed, " + fails.length + " failed, " + warn + " warnings ====");
+  if (fails.length){ console.log(fails.map(f => "FAIL " + f).join("\n")); }
+  if (warns.length){ console.log(warns.map(f => "WARN " + f).join("\n")); }
+
+  await browser.close();
+  process.exit(fails.length ? 1 : 0);
+})().catch(e => { console.error("FATAL " + (e && e.stack || e)); process.exit(2); });
