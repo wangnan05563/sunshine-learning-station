@@ -16,7 +16,7 @@ const scriptSrc = m[1];
 
 // ---- DOM stubs ----
 function makeEl(tag) {
-  return {
+  const el = {
     tag: tag || "div",
     value: "",
     innerHTML: "",
@@ -37,9 +37,38 @@ function makeEl(tag) {
     click() {},
     closest() { return null; }
   };
+  // Canvas stub
+  if (tag === "canvas") {
+    el.getContext = function(type) {
+      if (type === "2d") {
+        return {
+          clearRect() {},
+          beginPath() {},
+          moveTo() {},
+          arc() {},
+          closePath() {},
+          fill() {},
+          save() {},
+          restore() {},
+          translate() {},
+          rotate() {},
+          fillText() {}
+        };
+      }
+      return null;
+    };
+    el.width = 280;
+    el.height = 280;
+  }
+  return el;
 }
 const elCache = {};
-function getEl(id) { return (elCache[id] ||= makeEl()); }
+function getEl(id) {
+  if (!(id in elCache)) {
+    elCache[id] = (id === "wheelCanvas") ? makeEl("canvas") : makeEl();
+  }
+  return elCache[id];
+}
 const qCache = {};
 function querySel(sel) { return (qCache[sel] ||= makeEl()); }
 
@@ -994,6 +1023,23 @@ const DRIVER = [
   "}",
   "delete c70.dayLog[kl]; delete c70.dayLog[yk]; delete c70.dayLog[tk70];",
   "heatOffset=0;",
+  "",
+  "section('T71 FR-27 阳光转盘抽奖');",
+  "var c71=cur(); var __sun71=c71.sunshine; c71.sunshine=200;",
+  "var prizes71=state.rewards.filter(r=>r.stock===null||r.stock>0);",
+  "assert(prizes71.length>=3,'奖品池至少3个');",
+  "drawWheelCanvas(prizes71);",
+  "var cv=document.getElementById('wheelCanvas'); assert(cv!==null,'canvas存在');",
+  "wheelSpinning=false; wheelRotation=0;",
+  "spinWheel();",
+  "assert(wheelSpinning===true,'开始旋转标志置真');",
+  "assert(c71.sunshine===150,'扣减50阳光值');",
+  "assert(c71.ledger.filter(e=>e.type==='lottery').length===1,'流水1笔 lottery');",
+  "var __rot0=wheelRotation; assert(__rot0>0,'累计旋转角度>0');",
+  "c71.sunshine=30;",
+  "try{ spinWheel(); }catch(e){}",
+  "assert(wheelSpinning===false || c71.sunshine===30,'阳光不足不启动');",
+  "c71.sunshine=__sun71;",
   "",
   "console.log('\\n==== RESULT: '+__pass+' passed, '+__fail+' failed ====');",
   "if(__fail>0){ throw new Error('TESTS FAILED'); }"

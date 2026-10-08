@@ -270,6 +270,14 @@
   .heat-legend{ display:flex; gap:14px; align-items:center; margin-top:8px; font-size:11px; color:#888; }
   .heat-legend i{ display:inline-block; width:12px; height:12px; border-radius:4px; margin-right:4px; vertical-align:-2px; }
   #heatHint{ min-height:16px; }
+  /* FR-27 阳光转盘抽奖 */
+  .wheel-wrap{ display:flex; flex-direction:column; align-items:center; gap:12px; margin:12px 0; }
+  .wheel-box{ position:relative; width:280px; height:280px; }
+  .wheel-disc{ width:100%; height:100%; border-radius:50%; border:4px solid #3aa76d; position:relative; overflow:hidden; transition:transform 4s cubic-bezier(0.2,0.9,0.3,1); }
+  .wheel-pointer{ position:absolute; top:-12px; left:50%; transform:translateX(-50%); width:0; height:0; border-left:14px solid transparent; border-right:14px solid transparent; border-top:28px solid #e0795a; z-index:2; filter:drop-shadow(0 2px 4px rgba(0,0,0,0.2)); }
+  .wheel-center{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:40px; height:40px; background:#fff; border-radius:50%; border:3px solid #3aa76d; z-index:3; display:flex; align-items:center; justify-content:center; font-weight:800; color:#3aa76d; font-size:14px; }
+  .wheel-cost{ font-size:13px; color:#888; }
+  .wheel-result{ min-height:20px; font-weight:700; color:#3aa76d; text-align:center; }
   .stock{ font-size:12px; color:#888; }
   /* F 动效增强：顶栏阳光浮动提示 */
   .float-sun{ position:fixed; right:18px; top:54px; font-weight:800; font-size:15px; pointer-events:none; animation:float-sun 1.6s ease-out forwards; z-index:9999; }
@@ -289,6 +297,24 @@
     <div id="reward-list"></div>
     <button class="btn green" data-act="open-pinset" style="margin-top:6px;width:100%">🔐 家长设置 · 审批码</button>
     <p class="hint">说明：孩子兑换奖励须输入家长设置的审批码，工具只负责记账，现实活动（看电视 / 玩游戏 / 出游等）仍由家长线下确认是否放行。</p>
+    <button class="btn green" data-act="open-wheel" style="margin-top:8px;width:100%;background:#f2994a;color:#fff">🎡 阳光转盘抽奖（50☀️/次）</button>
+  </div>
+</div>
+
+<div class="overlay" id="wheelDialog">
+  <div class="sheet" style="max-width:360px">
+    <button class="close" data-act="close-wheel">×</button>
+    <h2>🎡 阳光转盘</h2>
+    <div class="wheel-wrap">
+      <div class="wheel-box">
+        <div class="wheel-pointer"></div>
+        <canvas id="wheelCanvas" width="280" height="280"></canvas>
+        <div class="wheel-center">GO</div>
+      </div>
+      <div class="wheel-cost">每次消耗 50 ☀️ · 必中惊喜奖品</div>
+      <div class="wheel-result" id="wheelResult"></div>
+      <button class="btn green" data-act="spin-wheel" id="spinBtn" style="width:100%">开始抽奖</button>
+    </div>
   </div>
 </div>
 
@@ -1727,6 +1753,101 @@ function renderStore(){
       '<button data-act="redeem" data-reward="'+escapeHtml(r.id)+'" '+(ok?"":"disabled")+'>'+(soldOut?"已兑完":(ok?"兑换":"阳光不足"))+'</button></div>';
   }).join("");
 }
+/* ---------- FR-27 阳光转盘抽奖（纯 Canvas + CSS 缓动，零依赖） ---------- */
+var WHEEL_SPINNING = false;
+var WHEEL_ROTATION = 0; // 累计旋转角度（deg）
+
+function drawWheelCanvas(prizes){
+  const canvas = document.getElementById("wheelCanvas");
+  if(!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height, cx = w/2, cy = h/2, r = Math.min(cx,cy)-4;
+  const n = prizes.length;
+  const arc = 2 * Math.PI / n;
+  const colors = ["#3aa76d","#f2994a","#e0795a","#5c6bc0","#8e44ad","#2980b9","#16a085","#d35400"];
+  
+  ctx.clearRect(0,0,w,h);
+  for(let i=0;i<n;i++){
+    const startAngle = i * arc - Math.PI/2;
+    const endAngle = (i+1) * arc - Math.PI/2;
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    ctx.arc(cx,cy,r,startAngle,endAngle);
+    ctx.closePath();
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fill();
+    
+    // 文字标签
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.rotate(startAngle + arc/2);
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 13px sans-serif";
+    const label = prizes[i].title.length > 8 ? prizes[i].title.slice(0,7)+"…" : prizes[i].title;
+    ctx.fillText(label, r-10, 4);
+    ctx.restore();
+  }
+}
+
+function openWheelDialog(){
+  const c = cur(); if(!c) return;
+  const dialog = document.getElementById("wheelDialog");
+  if(!dialog) return;
+  const prizes = state.rewards.filter(r => r.stock === null || r.stock > 0);
+  if(prizes.length === 0){ toast("暂无可抽奖品"); return; }
+  drawWheelCanvas(prizes);
+  document.getElementById("wheelResult").textContent = "";
+  document.getElementById("spinBtn").disabled = (c.sunshine < 50);
+  dialog.classList.add("show");
+}
+
+function spinWheel(){
+  if(WHEEL_SPINNING) return;
+  const c = cur(); if(!c) return;
+  if(c.sunshine < 50){ toast("阳光值不足 50☀️"); return; }
+  
+  const prizes = state.rewards.filter(r => r.stock === null || r.stock > 0);
+  if(prizes.length === 0){ toast("暂无可抽奖品"); return; }
+  
+  WHEEL_SPINNING = true;
+  addSunshine(-50, "lottery", "转盘抽奖消耗");
+  save(); renderTopbar();
+  
+  const canvas = document.getElementById("wheelCanvas");
+  const btn = document.getElementById("spinBtn");
+  btn.disabled = true;
+  
+  // 随机选中一个奖品
+  const idx = Math.floor(Math.random() * prizes.length);
+  const prize = prizes[idx];
+  
+  // 计算目标角度：每个扇区 360/n 度，指针在顶部（-90°），需要让选中扇区中心对准顶部
+  const n = prizes.length;
+  const sectorDeg = 360 / n;
+  // 选中扇区的中心角度（相对于初始位置）
+  const targetSectorCenter = idx * sectorDeg + sectorDeg/2;
+  // 需要旋转的角度 = 多圈(5圈) + 让目标扇区对准顶部
+  const extraSpins = 5 * 360;
+  const finalRotation = WHEEL_ROTATION + extraSpins + (360 - targetSectorCenter);
+  
+  canvas.style.transform = "rotate(" + finalRotation + "deg)";
+  WHEEL_ROTATION = finalRotation;
+  
+  setTimeout(()=>{
+    WHEEL_SPINNING = false;
+    btn.disabled = false;
+    
+    // 扣减库存
+    if(prize.stock !== null && typeof prize.stock === "number"){
+      prize.stock = Math.max(0, prize.stock - 1);
+    }
+    
+    document.getElementById("wheelResult").textContent = "🎉 恭喜获得：" + prize.title;
+    celebrate({ type:"lottery", text:"转盘抽中「"+prize.title+"」！" });
+    save(); renderStore();
+  }, 4200); // 略大于 CSS transition 时间
+}
 /* ---------- N4 学习统计（家长报表可视化，纯 CSS，零依赖） ---------- */
 function dayKeyLocal(d){
   const y=d.getFullYear(); const m=("0"+(d.getMonth()+1)).slice(-2); const dd=("0"+d.getDate()).slice(-2);
@@ -2695,6 +2816,9 @@ const DISPATCH = {
   "heat-prev": () => { heatOffset = (heatOffset < 0 ? 0 : heatOffset - 1); renderStats(); },
   "heat-next": () => { if(heatOffset < 0){ heatOffset += 1; renderStats(); } },
   "heat-cell": t => heatCellClick(t.getAttribute("data-date")),
+  "open-wheel": () => openWheelDialog(),
+  "close-wheel": () => document.getElementById("wheelDialog").classList.remove("show"),
+  "spin-wheel": () => spinWheel(),
   "open-weekly": () => openWeeklyReport(),
   "close-weekly": () => closeWeeklyReport(),
   "weekly-prev": () => shiftWeekly(-1),
@@ -2856,6 +2980,9 @@ var __APP__ = {
   renderContent: renderContent, computeSunTrend: computeSunTrend, renderStats: renderStats,
   openStats: openStats, closeStats: closeStats,
   buildHeatmapHTML: buildHeatmapHTML, heatCellClick: heatCellClick,
+  openWheelDialog: openWheelDialog, spinWheel: spinWheel, drawWheelCanvas: drawWheelCanvas,
+  get wheelSpinning(){ return WHEEL_SPINNING; }, set wheelSpinning(v){ WHEEL_SPINNING = v; },
+  get wheelRotation(){ return WHEEL_ROTATION; }, set wheelRotation(v){ WHEEL_ROTATION = v; },
   get heatOffset(){ return heatOffset; }, set heatOffset(v){ heatOffset = v; },
   weekRange: weekRange, weekKeyRange: weekKeyRange, computeWeekly: computeWeekly,
   buildWeeklyHTML: buildWeeklyHTML, renderWeekly: renderWeekly,
