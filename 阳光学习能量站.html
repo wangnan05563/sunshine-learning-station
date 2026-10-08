@@ -460,6 +460,9 @@ const SNAPSHOT_KEY = "sunshine_station_snapshots";  // FR-25：本地快照轮�
 const SNAP_MAX = 8;             // 快照最多保留份数（超出滚动淘汰最旧）
 const SNAP_INTERVAL_MS = 30000; // 写盘快照最小间隔（节流，避免高频 save 放大存储写）
 
+/* FR-29 当日完成度里程碑奖励：阈值(%) → 追加阳光 */
+const DAILY_TIERS = [ { pct:50, bonus:2 }, { pct:75, bonus:5 }, { pct:100, bonus:10 } ];
+
 function levelOf(s){
   const levels = (state && state.levels && state.levels.length) ? state.levels : LEVELS;
   let r = levels[0];
@@ -873,7 +876,7 @@ function buildChild(name, grade, pin){
     id:"child-"+Date.now().toString(36)+Math.floor(Math.random()*1000),
     name:(name||"").trim()||"小伙伴", grade:grade, pin:pin,
     sunshine:0, streakDays:0, lastCheckinDate:null, lastDailyReset:null, lastWeeklyReset:null,
-    awardedMilestones:[], dayLog:{}, perfectStreak:0, lastPerfectDate:null,
+    awardedMilestones:[], dayLog:{}, perfectStreak:0, lastPerfectDate:null, dailyAward:{date:null,tiers:[]},
     subjects: defaultSubjects(grade),
     curriculumByGrade:{}, ledger:[]
   };
@@ -1082,6 +1085,7 @@ function ensureIds(){
     if(!c.awardedMilestones || !Array.isArray(c.awardedMilestones)) c.awardedMilestones = [];
     if(!c.dayLog || typeof c.dayLog !== "object") c.dayLog = {};
     if(typeof c.perfectStreak !== "number") c.perfectStreak = 0;
+    if(!c.dailyAward || typeof c.dailyAward !== "object" || !Array.isArray(c.dailyAward.tiers)) c.dailyAward = { date:null, tiers:[] };
     if(c.lastPerfectDate !== null && typeof c.lastPerfectDate !== "string") c.lastPerfectDate = null;
     if(!c.curriculumByGrade || typeof c.curriculumByGrade !== "object") c.curriculumByGrade = {};
     if(!c.ledger || !Array.isArray(c.ledger)) c.ledger = [];
@@ -1253,6 +1257,7 @@ function undoCancel(){
   f.done = true;
   addSunshine(5, "task", "撤销取消："+u.title);
   updatePerfectWeek();
+  checkDailyMilestone();
   save(); renderContent(); renderTopbar();
   const __ed = document.getElementById("contentEditor");
   if (__ed && __ed.classList.contains("show")) renderEditor();
@@ -1335,6 +1340,36 @@ function addSunshine(amount, type, note){
   const after = levelIndexOf(c.sunshine);
   if (after > before) celebrate({ type:"levelup", text:"升级到 "+levelOf(c.sunshine)+"！" });
   pulseTopbar(); floatSun(amount);   // F 动效增强：阳光变更时顶栏跳动 + 浮动提示
+}
+
+/* FR-29：当日可见任务完成度跨过 50/75/100% 阈值时各发一次奖励；跌破不回收；无可见任务当天不判定 */
+function checkDailyMilestone(){
+  const c = cur(); if(!c) return;
+  if(!c.dailyAward || typeof c.dailyAward !== "object" || c.dailyAward.date !== todayStr())
+    c.dailyAward = { date: todayStr(), tiers: [] };
+  let total = 0, done = 0;
+  c.subjects.forEach(s=>s.units.forEach(u=>u.tasks.forEach(t=>{
+    if(!taskVisible(t)) return; total++; if(t.done) done++;
+  })));
+  if(total === 0) return;
+  const pct = done / total * 100;
+  DAILY_TIERS.forEach(tr=>{
+    if (pct >= tr.pct && c.dailyAward.tiers.indexOf(tr.pct) < 0){
+      c.dailyAward.tiers.push(tr.pct);
+      addSunshine(tr.bonus, "milestone_daily", "当日完成"+tr.pct+"%奖励");
+      if (tr.pct >= 100) celebrate({ type:"dailyfull", text:"今日任务全清！+"+tr.bonus+"☀️" });
+      else toast("完成度过半，追加 +"+tr.bonus+"☀️");
+    }
+  });
+  save();
+}
+/* UI 勾选路径包装：toggleTask 保持纯逻辑（直调测试不受新增判定影响），UI 层串联 FR-29 判定 */
+function onTaskToggle(taskId){
+  toggleTask(taskId);
+  checkDailyMilestone();
+  renderContent(); renderTopbar();
+  const __ed = document.getElementById("contentEditor");
+  if (__ed && __ed.classList.contains("show")) renderEditor();
 }
 
 /* 完美周检测（FR-18）：连续 7 天全部完成当日周期性任务，奖励一次后计数归零 */
@@ -1732,7 +1767,7 @@ function weekKeyRange(offset){
   return { startKey: dayKeyLocal(r.start), endKey: dayKeyLocal(r.end) };
 }
 function typeLabel(t){
-  const m = { checkin:"签到", task:"任务", milestone:"里程碑", perfectweek:"完美周", redeem:"兑换", repair:"对账", other:"其他" };
+  const m = { checkin:"签到", task:"任务", milestone:"里程碑", perfectweek:"完美周", redeem:"兑换", repair:"对账", milestone_daily:"完成度奖励", lottery:"抽奖", interest:"利息", badge:"徽章", redeem_request:"兑换申请", other:"其他" };
   return m[t] || t;
 }
 // 单个孩子的周报聚合：净增/赚取/兑出 + 按类型明细 + 任务完成快照
@@ -2645,7 +2680,7 @@ document.addEventListener("click", e=>{
 });
 document.addEventListener("change", e=>{
   const tg = e.target.closest('[data-act="toggle"]');
-  if(tg){ toggleTask(tg.getAttribute("data-task")); return; }
+  if(tg){ onTaskToggle(tg.getAttribute("data-task")); return; }
   const ed = e.target.closest('[data-edit]');
   if(ed){
     const f = ed.getAttribute("data-edit");
@@ -2789,6 +2824,9 @@ var __APP__ = {
   getSnapshots: getSnapshots, takeSnapshot: takeSnapshot, restoreSnapshot: restoreSnapshot,
   openRecoveryPanel: openRecoveryPanel, renderRecoveryList: renderRecoveryList,
   fnv1a32: fnv1a32, exportReminderDue: exportReminderDue,
+  /* —— FR-29 当日完成度里程碑 —— */
+  DAILY_TIERS: DAILY_TIERS, checkDailyMilestone: checkDailyMilestone, onTaskToggle: onTaskToggle,
+  taskVisible: taskVisible,
   get needsRecovery(){ return needsRecovery; }, set needsRecovery(v){ needsRecovery = v; }
 };
 (function(){
