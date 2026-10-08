@@ -234,6 +234,27 @@
   .sound-vol-row{ display:flex; align-items:center; gap:8px; margin-top:6px; }
   .sound-vol-row input[type=range]{ flex:1; }
   .sound-box .btn[data-act="toggle-sound"]{ margin-top:0; }
+  /* FR-33 兑换待批准队列 */
+  .req-box{ margin-top:8px; padding:8px 10px; border:1px solid var(--line); border-radius:10px; background:var(--card); }
+  .req-title{ font-weight:800; font-size:14px; }
+  .req-badge{ display:inline-block; min-width:18px; padding:0 5px; border-radius:9px; background:#e0795a; color:#fff; font-size:11px; text-align:center; }
+  .req-dot{ display:inline-block; min-width:15px; margin-left:4px; padding:0 4px; border-radius:8px; background:#e0795a; color:#fff; font-size:10px; }
+  .req-item{ border-top:1px dashed var(--line); padding:7px 0 3px; }
+  .req-item.req-done{ opacity:.72; }
+  .req-head{ font-size:13px; }
+  .req-cost{ color:var(--sun); font-weight:700; }
+  .req-st{ font-size:11px; padding:1px 6px; border-radius:8px; margin-left:4px; }
+  .req-st.wait{ background:#ffe6cc; color:#8a4b00; }
+  .req-st.ok{ background:#d8f0dc; color:#1b5e20; }
+  .req-st.no{ background:#f6d7d7; color:#8c1d18; }
+  .req-time{ font-size:11px; color:var(--muted); margin-top:2px; }
+  .req-note{ font-size:11px; color:#8a4b00; margin-top:2px; }
+  .req-btns{ display:flex; gap:6px; margin-top:5px; }
+  .btn.sm{ width:auto; padding:5px 12px; font-size:12px; }
+  .reward-btns{ display:flex; gap:6px; align-items:center; }
+  .ask-btn{ background:#e8f0fe; color:#1a4b8c; border:1px solid #c3d6f5; border-radius:8px; padding:6px 9px; font-size:12px; }
+  .mine-h{ font-size:13px; font-weight:700; margin:8px 0 4px; }
+  .mine-row{ font-size:12px; color:var(--muted); padding:2px 0; }
   .celebrate-bubble{
     position:absolute; left:50%; top:38%; transform:translate(-50%,-50%);
     background:#fff; color:var(--green-d); font-weight:800; font-size:20px;
@@ -348,6 +369,7 @@
     <h2>🛒 阳光兑换商店</h2>
     <div class="piggy-card" id="piggyBankCard"></div>
     <div id="reward-list"></div>
+    <div id="myRequests" style="display:none"></div>
     <h3 style="margin:16px 0 6px">🎨 主题商店</h3>
     <div id="theme-list"></div>
     <button class="btn green" data-act="open-pinset" style="margin-top:6px;width:100%">🔐 家长设置 · 审批码</button>
@@ -445,6 +467,11 @@
     <button class="btn" data-act="open-race" style="width:100%;margin-top:8px;background:#e67e22;color:#fff">🏁 专注挑战赛</button>
     <button class="btn" data-act="open-sync" style="width:100%;margin-top:8px;background:#3aa76d;color:#fff">☁️ 云同步设置（WebDAV）</button>
     <button class="btn" data-act="toggle-theme" style="width:100%;margin-top:8px">🌗 切换亮 / 暗主题</button>
+    <div class="req-box">
+      <div class="req-title">📥 兑换申请 <span id="reqCount" class="req-badge">0</span></div>
+      <p class="hint">孩子点「申请兑换」后先进这里，不占用阳光值；批准时才扣分发货，阳光不足会批准失败并留回执。</p>
+      <div id="requestList"></div>
+    </div>
     <div class="sound-box">
       <button class="btn" id="soundBtn" data-act="toggle-sound" style="width:100%;background:#7fb3d5;color:#123">🔔 完成提示音：开</button>
       <div class="sound-vol-row">
@@ -1018,6 +1045,29 @@ function normalizeBadgeFields(c){
   c.badges.equipped = (b && b.gold && c.badges.earned[b.id]) ? b.id : null;
 }
 function findBadge(id){ return BADGES.filter(b=>b.id===id)[0] || null; }
+/* FR-33 申请队列归一化：非数组补空、逐项剔除缺 id/类型的脏记录、状态限三值、金额必须为非负数 */
+const REQ_STATUS = { pending:true, approved:true, rejected:true };
+function normalizeRequests(c){
+  if(!Array.isArray(c.requests)) c.requests = [];
+  c.requests = c.requests.filter(r=>r && typeof r === "object" && typeof r.id === "string" && r.id && typeof r.rewardId === "string").map(r=>{
+    const out = { id:r.id, rewardId:r.rewardId,
+      title:(typeof r.title === "string" && r.title) ? r.title : "奖励",
+      cost:(typeof r.cost === "number" && !isNaN(r.cost) && r.cost >= 0) ? Math.round(r.cost) : 0,
+      status: REQ_STATUS[r.status] ? r.status : "pending",
+      requestedAt:(typeof r.requestedAt === "string") ? r.requestedAt : new Date().toISOString(),
+      resolvedAt:(typeof r.resolvedAt === "string") ? r.resolvedAt : null,
+      note:(typeof r.note === "string") ? r.note : "" };
+    if(out.status !== "pending" && !out.resolvedAt) out.resolvedAt = out.requestedAt;
+    return out;
+  });
+  /* 同一奖励只留最新一条待批准，避免导入/并发点击造成重复单（批准后前一条会结算掉） */
+  const seenPending = {};
+  c.requests = c.requests.filter(r=>{
+    if(r.status !== "pending") return true;
+    if(seenPending[r.rewardId]) return false;
+    seenPending[r.rewardId] = true; return true;
+  });
+}
 /* FR-26 主题商店目录：light/dark 免费内置，其余为可兑换主题包（纯 CSS 变量层） */
 function defaultThemes(){
   return [
@@ -1039,6 +1089,7 @@ function buildChild(name, grade, pin){
     curriculumByGrade:{}, ledger:[],
     piggyBank:{ balance:0, weeklyRate:0.05, lastInterestDate:null },
     badges:{ earned:{}, equipped:null },
+    requests:[],
     badgeStats:{ totalEarned:0, taskDone:0, redeemCount:0, piggyInterest:false, lotteryWin:false }
   };
 }
@@ -1179,6 +1230,7 @@ let state = null;
 let currentSubject = "yuwen";
 let pendingRewardId = null;
 let pendingThemeId = null;   // FR-26：主题兑换复用审批码浮层，待批准的主题 id
+let pendingReqId = null;     // FR-33：待批准的兑换申请 id（批准同样走审批码）
 let suppressDirty = false;
 let autoPushTimer = null;
 let needsRecovery = false;   // FR-25：主存档缺失/损坏且存在本地快照时置真，启动走恢复面板
@@ -1295,6 +1347,7 @@ function ensureIds(){
     }
     // FR-31 徽章拥有态与累计赚取统计兼容
     normalizeBadgeFields(c);
+    normalizeRequests(c);
     c.subjects.forEach(s=>{
       s.units.forEach((u,ui)=>{
         if(!u.id) u.id = s.id+"-u"+ui;
@@ -1721,6 +1774,7 @@ function setSoundVolume(raw){
 }
 function renderParentHub(){
   if (typeof document === "undefined") return;
+  renderRequests();   // FR-33：进入家长中心即刷新申请队列
   const btn = document.getElementById("soundBtn");
   if (btn) btn.textContent = (state && state.sound && state.sound.enabled) ? "🔔 完成提示音：开" : "🔕 完成提示音：关";
   const rng = document.getElementById("soundVol");
@@ -1934,9 +1988,126 @@ async function submitPin(){
   document.getElementById("pinEntry").classList.remove("show");
   const themeId = pendingThemeId; pendingThemeId = null;
   if(themeId){ redeemTheme(themeId); return; }   // redeemTheme 内部完成扣费、启用与庆祝
+  const reqId = pendingReqId; pendingReqId = null;
+  if(reqId){ await finalizeApprove(reqId); return; }   // FR-33：批准申请走同一审批码通道
   const id = pendingRewardId; pendingRewardId = null;
   redeem(id);
   celebrate({ type:"redeem", level:"full", text:"兑换成功！🎉" });   // FR-32：兑换用全量档
+}
+
+/* ---------- FR-33 兑换待批准队列（异步审批：孩子先申请，家长稍后批准） ----------
+   与 FR-11 当场输码通道并存：不冻结阳光、不扣分不发货，批准那一刻才结算，
+   因此余额不足/奖品兑完都会在批准时失败并写回执，而不是让队列里躺着兑不了的单。 */
+function pendingRequestCount(c){
+  if(!c || !Array.isArray(c.requests)) return 0;
+  return c.requests.filter(r=>r && r.status === "pending").length;
+}
+function findRequest(c, reqId){
+  if(!c || !Array.isArray(c.requests)) return null;
+  return c.requests.filter(r=>r && r.id === reqId)[0] || null;
+}
+function applyRedeem(rewardId){
+  const c = cur(); if(!c) return false;
+  const r = state.rewards.find(x=>x.id===rewardId);
+  if(!r){ toast("这个奖励不存在了"); return false; }
+  if(r.stock !== null && r.stock <= 0){ toast("「"+r.title+"」已兑完，不用申请啦"); return false; }
+  if(c.requests.some(x=>x.status==="pending" && x.rewardId===rewardId)){ toast("已经申请过「"+r.title+"」，等家长批准就好"); return false; }
+  c.requests.push({ id:"req-"+Date.now().toString(36)+Math.floor(Math.random()*1000),
+    rewardId:r.id, title:r.title, cost:r.cost, status:"pending",
+    requestedAt:new Date().toISOString(), resolvedAt:null, note:"" });
+  save(); renderStore(); renderTopbar();
+  if (document.getElementById("parentHub").classList.contains("show")) renderRequests();
+  toast("已提交申请：「"+r.title+"」，等家长批准后就到账");
+  return true;
+}
+/* 家长点开「批准」：仍走审批码浮层，码对了我才真正结算 */
+function approveRequest(reqId){
+  const c = cur(); if(!c) return false;
+  const req = findRequest(c, reqId);
+  if(!req || req.status !== "pending") return false;
+  if(!hasPin(c)){
+    toast("请家长先设置审批码");
+    openPinSettings();
+    return false;
+  }
+  pendingReqId = req.id;
+  document.getElementById("pinEntryReward").textContent = "批准申请：" + req.title + "（-" + req.cost + "☀️）";
+  document.getElementById("pinInput").value = "";
+  document.getElementById("pinEntry").classList.add("show");
+  setTimeout(()=>{ const el=document.getElementById("pinInput"); if(el) el.focus(); }, 50);
+  return true;
+}
+/* 批准时点才扣分发货；余额不足或已兑完则失败，理由写回回执让孩子看得到 */
+async function finalizeApprove(reqId){
+  const c = cur(); if(!c) return false;
+  const req = findRequest(c, reqId);
+  if(!req || req.status !== "pending"){ toast("这条申请已经处理过了"); return false; }
+  const r = state.rewards.find(x=>x.id===req.rewardId);
+  if(!r){ req.status="rejected"; req.note="奖励已被家长删除"; req.resolvedAt=new Date().toISOString(); save(); renderRequests(); renderStore(); toast("该奖励已不存在，申请自动退回"); return false; }
+  if(c.sunshine < req.cost){
+    req.status="rejected"; req.note="批准时阳光不足（当前 "+c.sunshine+"☀️，需 "+req.cost+"☀️）"; req.resolvedAt=new Date().toISOString();
+    save(); renderRequests(); renderStore();
+    toast("阳光不足，无法批准：还差 "+(req.cost-c.sunshine)+"☀️");
+    return false;
+  }
+  if(r.stock !== null && r.stock <= 0){
+    req.status="rejected"; req.note="批准时已兑完"; req.resolvedAt=new Date().toISOString();
+    save(); renderRequests(); renderStore();
+    toast("「"+r.title+"」已兑完，无法批准");
+    return false;
+  }
+  req.status="approved"; req.note=""; req.resolvedAt=new Date().toISOString();
+  redeem(r.id);   // 统一走兑换入口：扣阳光、记流水、扣库存
+  save(); renderRequests(); renderStore(); renderTopbar();
+  toast("已批准「"+req.title+"」，-"+req.cost+"☀️");
+  return true;
+}
+async function rejectRequest(reqId){
+  const c = cur(); if(!c) return false;
+  const req = findRequest(c, reqId);
+  if(!req || req.status !== "pending") return false;
+  const reason = await showPrompt("（可不填）告诉孩子这次没有批准的原因：", "");
+  req.status="rejected";
+  req.note = (typeof reason === "string" && reason.trim()) ? reason.trim() : "家长未批准";
+  req.resolvedAt=new Date().toISOString();
+  save(); renderRequests(); renderStore(); renderTopbar();
+  toast("已拒绝「"+req.title+"」");
+  return true;
+}
+function requestRowHTML(req){
+  const st = req.status === "approved" ? '<span class="req-st ok">已批准</span>'
+    : req.status === "rejected" ? '<span class="req-st no">未批准</span>'
+    : '<span class="req-st wait">待批准</span>';
+  const btns = req.status === "pending"
+    ? '<button class="btn green sm" data-act="approve-request" data-req="'+escapeHtml(req.id)+'">批准</button>' +
+      '<button class="btn sm" data-act="reject-request" data-req="'+escapeHtml(req.id)+'" style="background:#e6e6e6;color:#555">拒绝</button>'
+    : "";
+  return '<div class="req-item'+(req.status==="pending"?"":" req-done")+'">' +
+    '<div class="req-head"><b>'+escapeHtml(req.title)+'</b> <span class="req-cost">'+req.cost+'☀️</span> '+st+'</div>' +
+    '<div class="req-time">申请于 '+escapeHtml(fmtDateTime(req.requestedAt))+(req.resolvedAt?(" · 处理于 "+escapeHtml(fmtDateTime(req.resolvedAt))):"")+'</div>' +
+    (req.note ? '<div class="req-note">回执：'+escapeHtml(req.note)+'</div>' : '') +
+    (btns ? '<div class="req-btns">'+btns+'</div>' : '') + '</div>';
+}
+function renderRequests(){
+  const box = document.getElementById("requestList"); if(!box) return;
+  const c = cur(); if(!c) return;
+  const list = (c.requests || []).slice().reverse();   // 新的在前
+  box.innerHTML = list.length ? list.map(requestRowHTML).join("")
+    : '<p class="hint">还没有孩子提交的兑换申请。孩子在奖励商店点「申请兑换」后会出现在这里。</p>';
+  const cnt = document.getElementById("reqCount");
+  if (cnt){ const n = pendingRequestCount(c); cnt.textContent = String(n); cnt.style.display = n ? "inline-block" : "none"; }
+}
+/* 孩子端「我的申请」：只看得到自己的历史与回执，看不到别的孩子的 */
+function renderMyRequests(){
+  const box = document.getElementById("myRequests"); if(!box) return;
+  const c = cur(); if(!c) return;
+  const mine = (c.requests || []).filter(r=>r.status !== "pending").slice().reverse().slice(0,5);
+  if(!mine.length){ box.innerHTML = ""; box.style.display="none"; return; }
+  box.style.display = "block";
+  box.innerHTML = '<div class="mine-h">📬 我的申请回执</div>' + mine.map(r=>{
+    const mark = r.status === "approved" ? "✅ 已批准" : "❌ 未批准";
+    return '<div class="mine-row">'+escapeHtml(r.title)+' · '+mark+(r.note?(" · "+escapeHtml(r.note)):"")+'</div>';
+  }).join("");
 }
 
 /* ---------- 视图层 ---------- */
@@ -2030,7 +2201,7 @@ function renderTopbar(){
     '<select class="grade-select" id="childSelect" title="切换孩子">'+childOpts+'</select>' +
     '<input class="name-edit" id="nameInput" value="'+escapeHtml(c.name)+'" placeholder="孩子名字" />' +
     '<select class="grade-select" id="gradeSelect" title="选择年级">'+gradeOpts+'</select>' +
-    '<button class="pin-btn" data-act="open-parent-hub">👨‍👩‍👧 家长中心</button>' +
+    '<button class="pin-btn" data-act="open-parent-hub">👨‍👩‍👧 家长中心'+(pendingRequestCount(c)>0?('<span class="req-dot">'+pendingRequestCount(c)+'</span>'):'')+'</button>' +
     '<button class="pin-btn" data-act="toggle-theme">'+(state.theme==="dark"?"☀️ 亮色":"🌙 暗色")+'</button>' +
     '<div class="spacer"></div>' +
     '<div class="stat"><div class="v">🔥 '+c.streakDays+'</div><div class="k">连续打卡</div></div>' +
@@ -2101,15 +2272,20 @@ function renderStore(){
   const c = cur(); if(!c) return;
   renderPiggyBank();
   renderThemeShop();
+  renderMyRequests();
   const list = document.getElementById("reward-list");
   if(!list) return;
   list.innerHTML = state.rewards.map(r=>{
     const soldOut = (r.stock !== null && r.stock <= 0);
     const ok = c.sunshine >= r.cost && !soldOut;
     const stockTxt = (r.stock === null) ? "不限量" : ("剩 "+r.stock+" 份");
+    const asked = c.requests.some(x=>x.status==="pending" && x.rewardId===r.id);   // FR-33：同一奖励不重复申请
     return '<div class="reward"><div class="info"><div class="t">'+escapeHtml(r.title)+'</div>' +
       '<div class="c">'+r.cost+' ☀️　<span class="stock">'+stockTxt+'</span></div></div>' +
-      '<button data-act="redeem" data-reward="'+escapeHtml(r.id)+'" '+(ok?"":"disabled")+'>'+(soldOut?"已兑完":(ok?"兑换":"阳光不足"))+'</button></div>';
+      '<div class="reward-btns">' +
+      '<button data-act="redeem" data-reward="'+escapeHtml(r.id)+'" '+(ok?"":"disabled")+'>'+(soldOut?"已兑完":(ok?"兑换":"阳光不足"))+'</button>' +
+      '<button class="ask-btn" data-act="apply-redeem" data-reward="'+escapeHtml(r.id)+'" '+(soldOut||asked?"disabled":"")+'>'+(asked?"已申请":"申请兑换")+'</button>' +
+      '</div></div>';
   }).join("");
 }
 /* ---------- FR-27 阳光转盘抽奖（纯 Canvas + CSS 缓动，零依赖） ---------- */
@@ -2623,6 +2799,14 @@ function endRace(){
   save();
   renderRace();
 }
+/* ISO 时间串 → 「M/D HH:MM」，供 FR-33 申请队列展示；无法解析返回占位 */
+function fmtDateTime(iso){
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  const p = n => (n < 10 ? "0" : "") + n;
+  return (d.getMonth()+1) + "/" + d.getDate() + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
 function fmtMs(ms){
   const s = Math.max(0, Math.round(ms / 1000));
   const m = Math.floor(s / 60), sec = s % 60;
@@ -3029,6 +3213,7 @@ async function importFile(file){
     c.curriculumByGrade = c.curriculumByGrade || {};
     c.piggyBank = (c.piggyBank && typeof c.piggyBank === "object") ? c.piggyBank : { balance:0, weeklyRate:0.05, lastInterestDate:null };
     normalizeBadgeFields(c);
+    normalizeRequests(c);
     if(typeof c.grade !== "string") c.grade = "5";
     if(c.pin === undefined || c.pin === null) c.pin = "";
     if(typeof c.sunshine !== "number") c.sunshine = 0;
@@ -3126,6 +3311,7 @@ function applyRemote(data, remoteAt){
     c.curriculumByGrade = c.curriculumByGrade || {};
     c.piggyBank = (c.piggyBank && typeof c.piggyBank === "object") ? c.piggyBank : { balance:0, weeklyRate:0.05, lastInterestDate:null };
     normalizeBadgeFields(c);
+    normalizeRequests(c);
     if(typeof c.grade !== "string") c.grade = "5";
     if(c.pin === undefined || c.pin === null) c.pin = "";
     if(typeof c.sunshine !== "number") c.sunshine = 0;
@@ -3244,7 +3430,7 @@ const DISPATCH = {
   "open-pinset": () => { document.getElementById("store").classList.remove("show"); openPinSettings(); },
   "close-pinset": () => document.getElementById("pinSettings").classList.remove("show"),
   "save-pin": () => savePin(),
-  "close-pinentry": () => { document.getElementById("pinEntry").classList.remove("show"); pendingRewardId = null; pendingThemeId = null; },
+  "close-pinentry": () => { document.getElementById("pinEntry").classList.remove("show"); pendingRewardId = null; pendingThemeId = null; pendingReqId = null; },
   "submit-pin": () => submitPin(),
   redeem: t => requestRedeem(t.getAttribute("data-reward")),
   export: () => exportFile(),
@@ -3291,6 +3477,9 @@ const DISPATCH = {
   "heat-cell": t => heatCellClick(t.getAttribute("data-date")),
   "equip-badge": t => toggleEquipBadge(t.getAttribute("data-badge-id")),
   "toggle-sound": () => setSoundEnabled(!(state && state.sound && state.sound.enabled)),
+  "apply-redeem": t => applyRedeem(t.getAttribute("data-reward")),
+  "approve-request": t => approveRequest(t.getAttribute("data-req")),
+  "reject-request": t => rejectRequest(t.getAttribute("data-req")),
   "open-wheel": () => openWheelDialog(),
   "close-wheel": () => document.getElementById("wheelDialog").classList.remove("show"),
   "spin-wheel": () => spinWheel(),
@@ -3462,6 +3651,7 @@ var __APP__ = {
   addReward: addReward, updateReward: updateReward, removeReward: removeReward,
   addLevel: addLevel, updateLevel: updateLevel, removeLevel: removeLevel,
   renderContent: renderContent, computeSunTrend: computeSunTrend, renderStats: renderStats,
+  renderTopbar: renderTopbar, renderStore: renderStore, renderNav: renderNav, renderAll: renderAll,
   dayKeyLocal: dayKeyLocal,
   openStats: openStats, closeStats: closeStats,
   buildHeatmapHTML: buildHeatmapHTML, heatCellClick: heatCellClick,
@@ -3472,11 +3662,16 @@ var __APP__ = {
   defaultThemes: defaultThemes, findTheme: findTheme, themeOwned: themeOwned,
   useTheme: useTheme, redeemTheme: redeemTheme, requestRedeemTheme: requestRedeemTheme, renderThemeShop: renderThemeShop,
   get pendingThemeId(){ return pendingThemeId; }, set pendingThemeId(v){ pendingThemeId = v; },
+  get pendingReqId(){ return pendingReqId; }, set pendingReqId(v){ pendingReqId = v; },
   BADGES: BADGES, BADGE_RULES: BADGE_RULES, BADGE_MULTIPLIER: BADGE_MULTIPLIER,
   badgeMultiplier: badgeMultiplier, evaluateBadges: evaluateBadges, badgeCount: badgeCount, buildBadgeWallHTML: buildBadgeWallHTML,
   normalizeBadgeFields: normalizeBadgeFields, findBadge: findBadge, toggleEquipBadge: toggleEquipBadge,
   CHIMES: CHIMES, CONFETTI: CONFETTI, playChime: playChime,
   setSoundEnabled: setSoundEnabled, setSoundVolume: setSoundVolume, renderParentHub: renderParentHub,
+  REQ_STATUS: REQ_STATUS, normalizeRequests: normalizeRequests, pendingRequestCount: pendingRequestCount,
+  findRequest: findRequest, applyRedeem: applyRedeem, approveRequest: approveRequest,
+  finalizeApprove: finalizeApprove, rejectRequest: rejectRequest, renderRequests: renderRequests,
+  renderMyRequests: renderMyRequests, requestRowHTML: requestRowHTML, fmtDateTime: fmtDateTime,
   addSunshine: addSunshine,
   get wheelSpinning(){ return WHEEL_SPINNING; }, set wheelSpinning(v){ WHEEL_SPINNING = v; },
   get wheelRotation(){ return WHEEL_ROTATION; }, set wheelRotation(v){ WHEEL_ROTATION = v; },
