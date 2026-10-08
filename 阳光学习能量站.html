@@ -312,6 +312,13 @@
   .piggy-rate{ font-size:12px; color:#888; margin-top:4px; }
   .piggy-actions{ display:flex; gap:8px; margin-top:10px; }
   .piggy-actions button{ flex:1; }
+  /* FR-31 成就徽章墙 */
+  .badge-wall{ display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:8px; }
+  .badge-tile{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:8px 6px; text-align:center; }
+  .badge-icon{ font-size:22px; line-height:1.2; }
+  .badge-name{ font-size:12px; font-weight:700; margin-top:2px; }
+  .badge-hint{ font-size:10px; color:var(--muted); margin-top:2px; }
+  .badge-tile.badge-off{ opacity:.45; filter:grayscale(1); }
   .stock{ font-size:12px; color:#888; }
   /* F 动效增强：顶栏阳光浮动提示 */
   .float-sun{ position:fixed; right:18px; top:54px; font-weight:800; font-size:15px; pointer-events:none; animation:float-sun 1.6s ease-out forwards; z-index:9999; }
@@ -947,6 +954,36 @@ function defaultRewards(){
 function defaultLevels(){
   return clone(LEVELS).map((l,i)=>({ id:"lv"+i, min:l.min, name:l.name }));
 }
+/* FR-31 成就徽章目录：长期里程碑类徽章才带积分倍率（避免短期徽章影响既有阳光记账口径） */
+const BADGES = [
+  { id:"first_checkin", title:"第一次打卡",   icon:"🌱", mult:1,   hint:"完成首次每日打卡" },
+  { id:"streak_7",      title:"一周小坚持",   icon:"🔥", mult:1,   hint:"连续打卡满 7 天" },
+  { id:"streak_30",     title:"月度小达人",   icon:"🏅", mult:1.2, hint:"连续打卡满 30 天" },
+  { id:"streak_100",    title:"百日学霸",     icon:"👑", mult:1.5, hint:"连续打卡满 100 天" },
+  { id:"sun_500",       title:"阳光收藏家",   icon:"✨", mult:1,   hint:"累计赚取 500☀️" },
+  { id:"sun_2000",      title:"阳光大富翁",   icon:"💎", mult:1.2, hint:"累计赚取 2000☀️" },
+  { id:"all_subjects",  title:"全科启动",     icon:"📚", mult:1,   hint:"每个学科都至少完成一项任务" },
+  { id:"units_10",      title:"十单元通关",   icon:"🎯", mult:1,   hint:"累计完成 10 个单元" },
+  { id:"perfect_week",  title:"完美周",       icon:"🌈", mult:1,   hint:"有一天全部任务完成" },
+  { id:"all_clear_5",   title:"全清五连",     icon:"⭐", mult:1,   hint:"累计 5 天任务全清" },
+  { id:"race_first",    title:"竞速首胜",     icon:"🏁", mult:1,   hint:"专注挑战赛首个最佳成绩" },
+  { id:"saver_200",     title:"储蓄小能手",   icon:"🐷", mult:1,   hint:"存钱罐余额满 200☀️" }
+];
+/* 各徽章判定（纯函数式读取孩子现有数据，不改写；缺字段一律返回 false） */
+const BADGE_RULES = {
+  first_checkin: c=>!!c.lastCheckinDate,
+  streak_7:      c=>(c.streakDays||0) >= 7,
+  streak_30:     c=>(c.streakDays||0) >= 30,
+  streak_100:    c=>(c.streakDays||0) >= 100,
+  sun_500:       c=>(c.badgeStats&&c.badgeStats.totalEarned||0) >= 500,
+  sun_2000:      c=>(c.badgeStats&&c.badgeStats.totalEarned||0) >= 2000,
+  all_subjects:  c=>(c.subjects||[]).length>0 && c.subjects.every(s=>(s.units||[]).some(u=>(u.tasks||[]).some(t=>t.done))),
+  units_10:      c=>{ let n=0; (c.subjects||[]).forEach(s=>s.units.forEach(u=>{ if(u.tasks.length && u.tasks.every(t=>t.done)) n++; })); return n>=10; },
+  perfect_week:  c=>Object.keys(c.dayLog||{}).some(k=>c.dayLog[k] && c.dayLog[k].perfect),
+  all_clear_5:   c=>Object.keys(c.dayLog||{}).filter(k=>c.dayLog[k] && c.dayLog[k].perfect).length >= 5,
+  race_first:    c=>!!(c.raceBest && Object.keys(c.raceBest).length),
+  saver_200:     c=>!!(c.piggyBank && c.piggyBank.balance >= 200)
+};
 /* FR-26 主题商店目录：light/dark 免费内置，其余为可兑换主题包（纯 CSS 变量层） */
 function defaultThemes(){
   return [
@@ -966,7 +1003,8 @@ function buildChild(name, grade, pin){
     awardedMilestones:[], dayLog:{}, perfectStreak:0, lastPerfectDate:null, dailyAward:{date:null,tiers:[]},
     subjects: defaultSubjects(grade),
     curriculumByGrade:{}, ledger:[],
-    piggyBank:{ balance:0, weeklyRate:0.05, lastInterestDate:null }
+    piggyBank:{ balance:0, weeklyRate:0.05, lastInterestDate:null },
+    badges:{ earned:{} }, badgeStats:{ totalEarned:0 }
   };
 }
 function buildDefaultState(){
@@ -1214,6 +1252,9 @@ function ensureIds(){
       if(typeof c.piggyBank.weeklyRate !== "number" || isNaN(c.piggyBank.weeklyRate) || c.piggyBank.weeklyRate < 0) c.piggyBank.weeklyRate = 0.05;
       if(c.piggyBank.lastInterestDate !== null && typeof c.piggyBank.lastInterestDate !== "string") c.piggyBank.lastInterestDate = null;
     }
+    // FR-31 徽章拥有态与累计赚取统计兼容
+    if(!c.badges || typeof c.badges !== "object" || !c.badges.earned || typeof c.badges.earned !== "object") c.badges = { earned:{} };
+    if(!c.badgeStats || typeof c.badgeStats !== "object" || typeof c.badgeStats.totalEarned !== "number" || isNaN(c.badgeStats.totalEarned)) c.badgeStats = { totalEarned:0 };
     c.subjects.forEach(s=>{
       s.units.forEach((u,ui)=>{
         if(!u.id) u.id = s.id+"-u"+ui;
@@ -1455,14 +1496,50 @@ function pushLedger(type, amount, note){
   pruneLedger(c);   // FR-22 滚动窗口裁剪
 }
 
-/* 统一的阳光变更入口：改 sunshine + 记账 + 升级检测触发庆祝（FR-17） */
+/* 统一的阳光变更入口：改 sunshine + 记账 + 升级检测触发庆祝（FR-17）；
+   FR-31：赚取类入账按徽章倍率放大并累计徽章判定，取出/对账不属于「赚取」故不参与 */
+const EARN_EXCLUDED_TYPES = { withdraw:true, repair:true };
+function badgeMultiplier(c){
+  if(!c || !c.badges || !c.badges.earned) return 1;
+  let m = 1;
+  BADGES.forEach(b=>{ if(b.mult > 1 && c.badges.earned[b.id] && b.mult > m) m = b.mult; });
+  return m;
+}
+function evaluateBadges(){
+  const c = cur(); if(!c || !c.badges) return [];
+  const gained = [];
+  BADGES.forEach(b=>{
+    if(c.badges.earned[b.id]) return;
+    const rule = BADGE_RULES[b.id];
+    if(rule && rule(c)){ c.badges.earned[b.id] = new Date().toISOString(); gained.push(b); }
+  });
+  if(gained.length){
+    save();
+    gained.forEach(b=>{
+      celebrate({ type:"badge", text:"获得徽章 "+b.icon+" "+b.title+(b.mult>1?(" · 阳光×"+b.mult):"") });
+    });
+    const stats = document.getElementById("statsDialog");
+    if(stats && stats.classList.contains("show")) renderStats();
+  }
+  return gained;
+}
+function badgeCount(c){
+  return (c && c.badges && c.badges.earned) ? Object.keys(c.badges.earned).length : 0;
+}
 function addSunshine(amount, type, note){
   const c = cur(); if(!c) return;
+  const isEarn = amount > 0 && !EARN_EXCLUDED_TYPES[type];
+  if (isEarn){
+    const m = badgeMultiplier(c);
+    if (m > 1) amount = Math.round(amount * m);
+    c.badgeStats.totalEarned += amount;
+  }
   const before = levelIndexOf(c.sunshine);
   c.sunshine += amount;
   pushLedger(type, amount, note);
   const after = levelIndexOf(c.sunshine);
   if (after > before) celebrate({ type:"levelup", text:"升级到 "+levelOf(c.sunshine)+"！" });
+  evaluateBadges();   // FR-31：赚取/扣减后统一判定徽章
   pulseTopbar(); floatSun(amount);   // F 动效增强：阳光变更时顶栏跳动 + 浮动提示
 }
 
@@ -2101,6 +2178,19 @@ function computeSunTrend(c, days){
   }
   return out;
 }
+/* FR-31 徽章墙（统计页展示已获得/未获得，未获得置灰显示达成条件） */
+function buildBadgeWallHTML(c){
+  const earned = (c.badges && c.badges.earned) || {};
+  const tiles = BADGES.map(b=>{
+    const got = !!earned[b.id];
+    return '<div class="badge-tile'+(got?'':' badge-off')+'" title="'+escapeHtml(b.hint)+'">' +
+      '<div class="badge-icon">'+b.icon+'</div><div class="badge-name">'+escapeHtml(b.title)+'</div>' +
+      '<div class="badge-hint">'+escapeHtml(b.hint)+(b.mult>1?(' · 阳光×'+b.mult):'')+'</div></div>';
+  }).join("");
+  return '<h3 style="margin:16px 0 6px">🏅 成就徽章（'+badgeCount(c)+'/'+BADGES.length+'）</h3>' +
+    '<div class="badge-wall">'+tiles+'</div>' +
+    '<p class="hint">带「阳光×」的徽章会让之后赚到的阳光值按比例放大，兑换与取出不参与放大。</p>';
+}
 function renderStats(){
   const c=cur(); if(!c) return;
   const body=document.getElementById("statsBody"); if(!body) return;
@@ -2119,7 +2209,8 @@ function renderStats(){
   }).join("");
   const trendSec='<h3 style="margin:16px 0 6px">📈 近 7 天阳光增减</h3><div class="trend-chart">'+bars+'</div><p class="hint">柱高按每日净增减比例绘制；绿色=当日净赚，橙色=当日净兑出。</p>';
   const heatSec='<h3 style="margin:16px 0 6px">🗓️ 月历打卡热力图</h3>'+buildHeatmapHTML(c)+'<p class="hint">点击日期格可查看当日完成数；绿色=当日任务全部完成，浅橙=部分完成。</p>';
-  body.innerHTML=ov+subjSec+trendSec+heatSec;
+  const badgeSec='<h3 style="margin:16px 0 6px">🏅 成就徽章</h3>'+buildBadgeWallHTML(c);
+  body.innerHTML=ov+subjSec+trendSec+heatSec+badgeSec;
 }
 function openStats(){ heatOffset=0; const __ph=document.getElementById("parentHub"); if(__ph) __ph.classList.remove("show"); renderStats(); document.getElementById("statsDialog").classList.add("show"); }
 function closeStats(){ const el=document.getElementById("statsDialog"); if(el) el.classList.remove("show"); }
@@ -2797,6 +2888,8 @@ async function importFile(file){
     c.ledger = c.ledger || [];
     c.curriculumByGrade = c.curriculumByGrade || {};
     c.piggyBank = (c.piggyBank && typeof c.piggyBank === "object") ? c.piggyBank : { balance:0, weeklyRate:0.05, lastInterestDate:null };
+    c.badges = (c.badges && c.badges.earned && typeof c.badges.earned === "object") ? c.badges : { earned:{} };
+    c.badgeStats = (c.badgeStats && typeof c.badgeStats.totalEarned === "number") ? c.badgeStats : { totalEarned:0 };
     if(typeof c.grade !== "string") c.grade = "5";
     if(c.pin === undefined || c.pin === null) c.pin = "";
     if(typeof c.sunshine !== "number") c.sunshine = 0;
@@ -2893,6 +2986,8 @@ function applyRemote(data, remoteAt){
     c.ledger = c.ledger || [];
     c.curriculumByGrade = c.curriculumByGrade || {};
     c.piggyBank = (c.piggyBank && typeof c.piggyBank === "object") ? c.piggyBank : { balance:0, weeklyRate:0.05, lastInterestDate:null };
+    c.badges = (c.badges && c.badges.earned && typeof c.badges.earned === "object") ? c.badges : { earned:{} };
+    c.badgeStats = (c.badgeStats && typeof c.badgeStats.totalEarned === "number") ? c.badgeStats : { totalEarned:0 };
     if(typeof c.grade !== "string") c.grade = "5";
     if(c.pin === undefined || c.pin === null) c.pin = "";
     if(typeof c.sunshine !== "number") c.sunshine = 0;
@@ -3188,6 +3283,7 @@ load();
   try { await migrateSecrets(); } catch(e){ /* 迁移失败不影响启动，兼容路径兜底 */ }
   renderAll();
   applyTheme();
+  evaluateBadges();   // FR-31：启动时补判一次，历史数据已达标的徽章不漏发
   if (needsRecovery) openRecoveryPanel();   // FR-25：主存档缺失但有快照 → 恢复引导
 })();
 
@@ -3233,6 +3329,9 @@ var __APP__ = {
   defaultThemes: defaultThemes, findTheme: findTheme, themeOwned: themeOwned,
   useTheme: useTheme, redeemTheme: redeemTheme, requestRedeemTheme: requestRedeemTheme, renderThemeShop: renderThemeShop,
   get pendingThemeId(){ return pendingThemeId; }, set pendingThemeId(v){ pendingThemeId = v; },
+  BADGES: BADGES, BADGE_RULES: BADGE_RULES,
+  badgeMultiplier: badgeMultiplier, evaluateBadges: evaluateBadges, badgeCount: badgeCount, buildBadgeWallHTML: buildBadgeWallHTML,
+  addSunshine: addSunshine,
   get wheelSpinning(){ return WHEEL_SPINNING; }, set wheelSpinning(v){ WHEEL_SPINNING = v; },
   get wheelRotation(){ return WHEEL_ROTATION; }, set wheelRotation(v){ WHEEL_ROTATION = v; },
   get heatOffset(){ return heatOffset; }, set heatOffset(v){ heatOffset = v; },
