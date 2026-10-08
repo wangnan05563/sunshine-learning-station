@@ -10,13 +10,13 @@
 <style>
   :root{
     --green:#3aa76d; --green-d:#2e8b57; --green-l:#e8f7ee;
-    --sun:#ffb300; --ink:#234d36; --muted:#6b8a78; --card:#ffffff;
+    --sun:#ffb300; --sun-ink:#996b00; --ink:#234d36; --muted:#5f7a6a; --card:#ffffff;
     --line:#d6ecdd; --shadow:0 4px 14px rgba(46,139,87,.12);
   }
   /* ---------- FR-20 亮/暗主题 ---------- */
   [data-theme="dark"]{
     --green:#3aa76d; --green-d:#23704a; --green-l:#1c3327;
-    --sun:#ffb300; --ink:#e7f3ec; --muted:#9cc2ad; --card:#16241c;
+    --sun:#ffb300; --sun-ink:#ffb300; --ink:#e7f3ec; --muted:#9cc2ad; --card:#16241c;
     --line:#2c4636; --shadow:0 4px 14px rgba(0,0,0,.45);
   }
   [data-theme="dark"] body{
@@ -41,19 +41,19 @@
   /* ---------- FR-26 主题包（海洋/森林/太空，纯 CSS 变量层，兑换后生效） ---------- */
   [data-theme="ocean"]{
     --green:#2b8fbf; --green-d:#1c6a93; --green-l:#e3f3fb;
-    --sun:#ffb300; --ink:#123a4d; --muted:#5b8ba3; --card:#ffffff;
+    --sun:#ffb300; --sun-ink:#996b00; --ink:#123a4d; --muted:#4f798e; --card:#ffffff;
     --line:#cfe8f4; --shadow:0 4px 14px rgba(28,106,147,.14);
   }
   [data-theme="ocean"] body{ background:linear-gradient(160deg,#e6f6fd 0%,#d3ecf7 100%); }
   [data-theme="forest"]{
     --green:#4e9a51; --green-d:#37703a; --green-l:#eaf5e9;
-    --sun:#e8a33d; --ink:#2c4423; --muted:#7a9070; --card:#fffdf6;
+    --sun:#e8a33d; --sun-ink:#a26813; --ink:#2c4423; --muted:#677a5f; --card:#fffdf6;
     --line:#dcedd8; --shadow:0 4px 14px rgba(55,112,58,.14);
   }
   [data-theme="forest"] body{ background:linear-gradient(160deg,#f2f8e9 0%,#e5f1dd 100%); }
   [data-theme="space"]{
     --green:#7c6ce0; --green-d:#5140a8; --green-l:#efeaff;
-    --sun:#ffd166; --ink:#241b47; --muted:#8177a8; --card:#ffffff;
+    --sun:#ffd166; --sun-ink:#996b00; --ink:#241b47; --muted:#786da1; --card:#ffffff;
     --line:#e0d8ff; --shadow:0 4px 14px rgba(81,64,168,.16);
   }
   [data-theme="space"] body{ background:linear-gradient(160deg,#efeaff 0%,#e0e6ff 100%); }
@@ -138,7 +138,7 @@
   .task input{width:24px; height:24px; accent-color:var(--green); cursor:pointer;}
   .task .label{flex:1; font-size:14px;}
   .task.done .label{text-decoration:line-through; color:var(--muted);}
-  .task .sun{font-size:12px; color:var(--sun); font-weight:700; white-space:nowrap;}
+  .task .sun{font-size:12px; color:var(--sun-ink); font-weight:700; white-space:nowrap;}
   .task.done .sun{opacity:.45;}
   .btn{
     border:none; cursor:pointer; border-radius:12px; padding:12px 16px; font-weight:800;
@@ -158,6 +158,9 @@
     align-items:center; justify-content:center; padding:18px; z-index:50;
   }
   .overlay.show{display:flex;}
+  /* FR-33：审批码输入是从家长中心/商店等浮层「层内」唤起的通用对话框，必须压在唤起它的浮层之上，
+     否则 DOM 序靠前的 #pinEntry 会被 #parentHub 遮住，家长点「批准」后无法输入审批码。 */
+  #pinEntry{ z-index:60; }
   .sheet{
     background:#fff; border-radius:18px; padding:20px; width:100%; max-width:420px;
     box-shadow:0 10px 40px rgba(0,0,0,.25); max-height:86vh; overflow:auto;
@@ -174,7 +177,7 @@
   }
   .reward .info{flex:1;}
   .reward .info .t{font-weight:700;}
-  .reward .info .c{font-size:13px; color:var(--sun); font-weight:700;}
+  .reward .info .c{font-size:13px; color:var(--sun-ink); font-weight:700;}
   .reward button{border:none; background:var(--green); color:#fff; border-radius:10px; padding:9px 14px; font-weight:700; cursor:pointer;}
   .reward button:disabled{background:#cddecd; color:#fff; cursor:not-allowed;}
   .sheet .close{float:right; border:none; background:transparent; font-size:22px; cursor:pointer; color:var(--muted);}
@@ -242,7 +245,7 @@
   .req-item{ border-top:1px dashed var(--line); padding:7px 0 3px; }
   .req-item.req-done{ opacity:.72; }
   .req-head{ font-size:13px; }
-  .req-cost{ color:var(--sun); font-weight:700; }
+  .req-cost{ color:var(--sun-ink); font-weight:700; }
   .req-st{ font-size:11px; padding:1px 6px; border-radius:8px; margin-left:4px; }
   .req-st.wait{ background:#ffe6cc; color:#8a4b00; }
   .req-st.ok{ background:#d8f0dc; color:#1b5e20; }
@@ -280,7 +283,7 @@
   .task-tile .tile-cb{ width:30px; height:30px; accent-color:var(--green); cursor:pointer; }
   .task-tile .tile-emoji{ font-size:42px; line-height:1; }
   .task-tile .tile-label{ font-size:16px; font-weight:700; color:var(--ink); }
-  .task-tile .tile-sun{ font-size:13px; color:var(--sun); font-weight:700; }
+  .task-tile .tile-sun{ font-size:13px; color:var(--sun-ink); font-weight:700; }
   .task-tile.done{ background:var(--green-l); border-color:var(--green); }
   .task-tile.done .tile-label{ text-decoration:line-through; color:var(--muted); }
   [data-theme="dark"] .task-tile{ background:#13201a; border-color:#2c4636; }
@@ -328,7 +331,7 @@
   /* FR-27 阳光转盘抽奖 */
   .wheel-wrap{ display:flex; flex-direction:column; align-items:center; gap:12px; margin:12px 0; }
   .wheel-box{ position:relative; width:280px; height:280px; }
-  .wheel-disc{ width:100%; height:100%; border-radius:50%; border:4px solid #3aa76d; position:relative; overflow:hidden; transition:transform 4s cubic-bezier(0.2,0.9,0.3,1); }
+  .wheel-disc{ width:100%; height:100%; border-radius:50%; border:4px solid #3aa76d; position:relative; overflow:hidden; transition:transform 2.2s cubic-bezier(0.2,0.9,0.3,1); }
   .wheel-pointer{ position:absolute; top:-12px; left:50%; transform:translateX(-50%); width:0; height:0; border-left:14px solid transparent; border-right:14px solid transparent; border-top:28px solid #e0795a; z-index:2; filter:drop-shadow(0 2px 4px rgba(0,0,0,0.2)); }
   .wheel-center{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:40px; height:40px; background:#fff; border-radius:50%; border:3px solid #3aa76d; z-index:3; display:flex; align-items:center; justify-content:center; font-weight:800; color:#3aa76d; font-size:14px; }
   .wheel-cost{ font-size:13px; color:#888; }
@@ -401,7 +404,7 @@
     <div class="wheel-wrap">
       <div class="wheel-box">
         <div class="wheel-pointer"></div>
-        <canvas id="wheelCanvas" width="280" height="280"></canvas>
+        <canvas id="wheelCanvas" class="wheel-disc" width="280" height="280"></canvas>
         <div class="wheel-center">GO</div>
       </div>
       <div class="wheel-cost">每次消耗 50 ☀️ · 必中惊喜奖品</div>
@@ -2442,7 +2445,7 @@ function spinWheel(){
     const cc = cur();
     if(cc && cc.badgeStats){ cc.badgeStats.lotteryWin = true; }   // FR-31 转盘首中
     save(); renderStore(); evaluateBadges();
-  }, 4200); // 略大于 CSS transition 时间
+  }, 2400); // 略大于 CSS transition 时间（PRD：缓动停针 1.5~2.5s）
 }
 
 /* ---------- FR-30 存钱罐与利息（财商教育：储蓄 vs 即时消费，周利率家长可配） ---------- */
@@ -3278,7 +3281,12 @@ function renderNumPads(){
   if(pin) pin.readOnly = coarse;                       // 真触屏：只用小键盘，避免两套输入打架
   const dlg = document.getElementById("promptDialog");
   const pinput = document.getElementById("promptInput");
-  if(pinput) pinput.readOnly = coarse && !!(dlg && dlg.classList && dlg.classList.contains("num"));
+  if(pinput){
+    // FR-36：数字场景补上「原生约束」——金额/天数框此前无 maxlength，大键盘可无限追加
+    if(_promptNumeric){ pinput.setAttribute("maxlength","9"); pinput.setAttribute("inputmode","numeric"); }
+    else { pinput.removeAttribute("maxlength"); pinput.setAttribute("inputmode","text"); }
+    pinput.readOnly = coarse && !!(dlg && dlg.classList && dlg.classList.contains("num"));
+  }
 }
 /* 单键写入：尊重目标输入的 maxlength（审批码 6 位即由此约束） */
 function applyNumKey(targetId, key){
@@ -3712,7 +3720,7 @@ document.addEventListener("change", e=>{
   const tg = e.target.closest('[data-act="toggle"]');
   if(tg){ onTaskToggle(tg.getAttribute("data-task")); return; }
   const sv = e.target.closest('[data-act="sound-volume"]');
-  if(sv){ setSoundVolume(sv.value); return; }
+  if(sv){ setSoundVolume(Number(sv.value) / 100); return; }   // 滑杆是 0~100 百分比，API 收 0~1
   const ed = e.target.closest('[data-edit]');
   if(ed){
     const f = ed.getAttribute("data-edit");
