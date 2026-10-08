@@ -38,6 +38,33 @@
   [data-theme="dark"] .ed-name,
   [data-theme="dark"] .ed-num{ background:#1f3228; color:var(--ink); }
   [data-theme="dark"] .sheet input[type=password]{ background:#1f3228; color:#e7f3ec; }
+  /* ---------- FR-26 主题包（海洋/森林/太空，纯 CSS 变量层，兑换后生效） ---------- */
+  [data-theme="ocean"]{
+    --green:#2b8fbf; --green-d:#1c6a93; --green-l:#e3f3fb;
+    --sun:#ffb300; --ink:#123a4d; --muted:#5b8ba3; --card:#ffffff;
+    --line:#cfe8f4; --shadow:0 4px 14px rgba(28,106,147,.14);
+  }
+  [data-theme="ocean"] body{ background:linear-gradient(160deg,#e6f6fd 0%,#d3ecf7 100%); }
+  [data-theme="forest"]{
+    --green:#4e9a51; --green-d:#37703a; --green-l:#eaf5e9;
+    --sun:#e8a33d; --ink:#2c4423; --muted:#7a9070; --card:#fffdf6;
+    --line:#dcedd8; --shadow:0 4px 14px rgba(55,112,58,.14);
+  }
+  [data-theme="forest"] body{ background:linear-gradient(160deg,#f2f8e9 0%,#e5f1dd 100%); }
+  [data-theme="space"]{
+    --green:#7c6ce0; --green-d:#5140a8; --green-l:#efeaff;
+    --sun:#ffd166; --ink:#241b47; --muted:#8177a8; --card:#ffffff;
+    --line:#e0d8ff; --shadow:0 4px 14px rgba(81,64,168,.16);
+  }
+  [data-theme="space"] body{ background:linear-gradient(160deg,#efeaff 0%,#e0e6ff 100%); }
+  .theme-row{ display:flex; align-items:center; gap:10px; padding:10px 12px; background:var(--card); border:1px solid var(--line); border-radius:12px; margin:8px 0; }
+  .theme-swatch{ width:34px; height:34px; border-radius:10px; flex:0 0 34px; border:1px solid rgba(0,0,0,.08); }
+  .theme-info{ flex:1; }
+  .theme-name{ font-weight:700; }
+  .theme-cost{ font-size:12px; color:var(--muted); }
+  .theme-row button{ border:none; border-radius:10px; padding:7px 12px; font-weight:700; cursor:pointer; background:var(--green); color:#fff; }
+  .theme-row button:disabled{ background:#cfd8d2; cursor:default; }
+  .theme-cur{ font-size:12px; color:var(--green-d); font-weight:700; }
   *{box-sizing:border-box;}
   body{
     margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
@@ -303,6 +330,8 @@
     <h2>🛒 阳光兑换商店</h2>
     <div class="piggy-card" id="piggyBankCard"></div>
     <div id="reward-list"></div>
+    <h3 style="margin:16px 0 6px">🎨 主题商店</h3>
+    <div id="theme-list"></div>
     <button class="btn green" data-act="open-pinset" style="margin-top:6px;width:100%">🔐 家长设置 · 审批码</button>
     <p class="hint">说明：孩子兑换奖励须输入家长设置的审批码，工具只负责记账，现实活动（看电视 / 玩游戏 / 出游等）仍由家长线下确认是否放行。</p>
     <button class="btn green" data-act="open-wheel" style="margin-top:8px;width:100%;background:#f2994a;color:#fff">🎡 阳光转盘抽奖（50☀️/次）</button>
@@ -918,6 +947,16 @@ function defaultRewards(){
 function defaultLevels(){
   return clone(LEVELS).map((l,i)=>({ id:"lv"+i, min:l.min, name:l.name }));
 }
+/* FR-26 主题商店目录：light/dark 免费内置，其余为可兑换主题包（纯 CSS 变量层） */
+function defaultThemes(){
+  return [
+    { id:"light", title:"默认阳光绿", cost:0,  swatch:"linear-gradient(135deg,#3aa76d,#e8f7ee)" },
+    { id:"dark",  title:"夜晚星原",   cost:0,  swatch:"linear-gradient(135deg,#16241c,#3aa76d)" },
+    { id:"ocean", title:"海洋世界",   cost:150, swatch:"linear-gradient(135deg,#2b8fbf,#e3f3fb)" },
+    { id:"forest",title:"森林秘境",   cost:180, swatch:"linear-gradient(135deg,#4e9a51,#f2f8e9)" },
+    { id:"space", title:"太空漫游",   cost:220, swatch:"linear-gradient(135deg,#7c6ce0,#efeaff)" }
+  ];
+}
 function buildChild(name, grade, pin){
   grade = grade || "5"; pin = pin || "";
   return {
@@ -937,6 +976,8 @@ function buildDefaultState(){
     theme:"light",
     childMode:false,
     rewards: defaultRewards(),
+    themes: defaultThemes(),
+    ownedThemes: ["light","dark"],
     levels: defaultLevels(),
     sync: defaultSync(),
     children:[ first ],
@@ -1063,6 +1104,7 @@ async function migrateSecrets(){
 let state = null;
 let currentSubject = "yuwen";
 let pendingRewardId = null;
+let pendingThemeId = null;   // FR-26：主题兑换复用审批码浮层，待批准的主题 id
 let suppressDirty = false;
 let autoPushTimer = null;
 let needsRecovery = false;   // FR-25：主存档缺失/损坏且存在本地快照时置真，启动走恢复面板
@@ -1099,8 +1141,33 @@ function save(){
 function ensureIds(){
   if(!state) return;
   if(!state.meta || typeof state.meta !== "object") state.meta = { version:1, schema:"sunshine_station" };
-  if(state.theme !== "dark") state.theme = "light";
   if(typeof state.childMode !== "boolean") state.childMode = false;
+  // FR-26 主题目录与拥有态归一化（light/dark 为内置必备项，缺失即补回，避免主题卡死）
+  if(!Array.isArray(state.themes) || !state.themes.length) state.themes = defaultThemes();
+  else {
+    const knownIds = {};
+    state.themes.forEach((t,i)=>{
+      if(!t || typeof t !== "object"){ state.themes[i] = defaultThemes()[i] || { id:"t"+i, title:"主题", cost:100 }; }
+      t = state.themes[i];
+      if(typeof t.id !== "string" || !t.id) t.id = "th"+i;
+      if(typeof t.title !== "string") t.title = "主题";
+      if(typeof t.cost !== "number" || isNaN(t.cost) || t.cost < 0) t.cost = 100;
+      if(typeof t.swatch !== "string") t.swatch = "linear-gradient(135deg,var(--green),var(--green-l))";
+      knownIds[t.id] = true;
+    });
+    defaultThemes().forEach(dt=>{ if(!knownIds[dt.id]) state.themes.push(dt); });
+  }
+  if(!Array.isArray(state.ownedThemes)) state.ownedThemes = ["light","dark"];
+  else {
+    const seen = {};
+    state.ownedThemes = state.ownedThemes.filter(id=>{
+      if(typeof id !== "string" || !id || seen[id]) return false;
+      seen[id] = true; return true;
+    });
+    ["light","dark"].forEach(id=>{ if(!seen[id]) state.ownedThemes.push(id); });
+  }
+  const themeOk = state.themes.some(t=>t.id===state.theme) && state.ownedThemes.indexOf(state.theme) >= 0;
+  if(!themeOk) state.theme = (state.ownedThemes.indexOf("light") >= 0) ? "light" : state.ownedThemes[0];
   if(!state.rewards) state.rewards = defaultRewards();
   else state.rewards.forEach(r=>{
     if(!r.id) r.id = "rw"+Date.now().toString(36)+Math.floor(Math.random()*1000);
@@ -1657,6 +1724,8 @@ async function submitPin(){
   const v = document.getElementById("pinInput").value.trim();
   if(!await verifyPin(v, c.pin)){ toast("审批码错误，兑换未通过"); document.getElementById("pinInput").value=""; return; }
   document.getElementById("pinEntry").classList.remove("show");
+  const themeId = pendingThemeId; pendingThemeId = null;
+  if(themeId){ redeemTheme(themeId); return; }   // redeemTheme 内部完成扣费、启用与庆祝
   const id = pendingRewardId; pendingRewardId = null;
   redeem(id);
   celebrate({ type:"redeem", text:"兑换成功！🎉" });
@@ -1674,6 +1743,68 @@ function toggleTheme(){
   applyTheme(); save();
   renderTopbar();
   toast(state.theme === "dark" ? "已切换为暗色 🌙" : "已切换为亮色 ☀️");
+}
+
+/* FR-26 主题商店：兑换即永久拥有（主题是全栈视觉变量层，故全家共享一份），拥有后可随时切换 */
+function findTheme(id){
+  const list = (state && Array.isArray(state.themes)) ? state.themes : [];
+  for(let i=0;i<list.length;i++){ if(list[i].id===id) return list[i]; }
+  return null;
+}
+function themeOwned(id){
+  return !!(state && Array.isArray(state.ownedThemes) && state.ownedThemes.indexOf(id) >= 0);
+}
+function useTheme(id){
+  const t = findTheme(id); if(!t) return false;
+  if(!themeOwned(id)){ toast("该主题尚未兑换"); return false; }
+  state.theme = id; applyTheme(); save();
+  renderThemeShop(); renderTopbar();
+  toast("已换上「"+t.title+"」");
+  return true;
+}
+function redeemTheme(id){
+  const c = cur(); const t = findTheme(id);
+  if(!c || !t) return false;
+  if(themeOwned(id)){ toast("已拥有「"+t.title+"」"); return true; }
+  if(c.sunshine < t.cost){ toast("阳光值不足，还差 "+(t.cost-c.sunshine)+"☀️"); return false; }
+  addSunshine(-t.cost, "theme", "兑换主题："+t.title);
+  state.ownedThemes.push(id);
+  state.theme = id; applyTheme(); save();
+  renderTopbar(); renderStore();
+  celebrate({ type:"theme", text:"新主题上架！「"+t.title+"」已启用" });
+  return true;
+}
+function requestRedeemTheme(id){
+  const c = cur(); const t = findTheme(id);
+  if(!c || !t) return;
+  if(themeOwned(id)){ useTheme(id); return; }
+  if(!hasPin(c)){
+    toast("请家长先设置审批码");
+    openPinSettings();
+    return;
+  }
+  pendingThemeId = id;
+  document.getElementById("pinEntryReward").textContent = "即将兑换主题：" + t.title;
+  document.getElementById("pinInput").value = "";
+  document.getElementById("pinEntry").classList.add("show");
+  setTimeout(()=>{ const el=document.getElementById("pinInput"); if(el) el.focus(); }, 50);
+}
+function renderThemeShop(){
+  const el = document.getElementById("theme-list");
+  if(!el || !state || !Array.isArray(state.themes)) return;
+  const c = cur();
+  el.innerHTML = state.themes.map(t=>{
+    const owned = themeOwned(t.id);
+    const inUse = state.theme === t.id;
+    let action;
+    if(inUse) action = '<span class="theme-cur">使用中</span>';
+    else if(owned) action = '<button data-act="use-theme" data-theme-id="'+escapeHtml(t.id)+'">使用</button>';
+    else action = '<button data-act="redeem-theme" data-theme-id="'+escapeHtml(t.id)+'" '+((c && c.sunshine >= t.cost)?"":"disabled")+'>兑换</button>';
+    const costTxt = (t.cost === 0) ? "内置免费" : (t.cost + " ☀️");
+    return '<div class="theme-row"><span class="theme-swatch" style="background:'+t.swatch+'"></span>' +
+      '<div class="theme-info"><div class="theme-name">'+escapeHtml(t.title)+'</div>' +
+      '<div class="theme-cost">'+costTxt+(owned?" · 已拥有":"")+'</div></div>'+action+'</div>';
+  }).join("");
 }
 
 /* === MODULE 5：渲染（顶栏/导航/内容/商店/统计/编辑器/家长中心） === */
@@ -1761,6 +1892,7 @@ function renderContent(){
 function renderStore(){
   const c = cur(); if(!c) return;
   renderPiggyBank();
+  renderThemeShop();
   const list = document.getElementById("reward-list");
   if(!list) return;
   list.innerHTML = state.rewards.map(r=>{
@@ -2050,7 +2182,7 @@ function weekKeyRange(offset){
   return { startKey: dayKeyLocal(r.start), endKey: dayKeyLocal(r.end) };
 }
 function typeLabel(t){
-  const m = { checkin:"签到", task:"任务", milestone:"里程碑", perfectweek:"完美周", redeem:"兑换", repair:"对账", milestone_daily:"完成度奖励", lottery:"抽奖", interest:"利息", deposit:"存入", withdraw:"取出", badge:"徽章", redeem_request:"兑换申请", other:"其他" };
+  const m = { checkin:"签到", task:"任务", milestone:"里程碑", perfectweek:"完美周", redeem:"兑换", repair:"对账", milestone_daily:"完成度奖励", lottery:"抽奖", interest:"利息", deposit:"存入", withdraw:"取出", theme:"主题兑换", badge:"徽章", redeem_request:"兑换申请", other:"其他" };
   return m[t] || t;
 }
 // 单个孩子的周报聚合：净增/赚取/兑出 + 按类型明细 + 任务完成快照
@@ -2879,7 +3011,7 @@ const DISPATCH = {
   "open-pinset": () => { document.getElementById("store").classList.remove("show"); openPinSettings(); },
   "close-pinset": () => document.getElementById("pinSettings").classList.remove("show"),
   "save-pin": () => savePin(),
-  "close-pinentry": () => { document.getElementById("pinEntry").classList.remove("show"); pendingRewardId = null; },
+  "close-pinentry": () => { document.getElementById("pinEntry").classList.remove("show"); pendingRewardId = null; pendingThemeId = null; },
   "submit-pin": () => submitPin(),
   redeem: t => requestRedeem(t.getAttribute("data-reward")),
   export: () => exportFile(),
@@ -2930,6 +3062,8 @@ const DISPATCH = {
   "piggy-deposit": () => promptPiggyDeposit(),
   "piggy-withdraw": () => promptPiggyWithdraw(),
   "piggy-rate": () => promptPiggyRate(),
+  "redeem-theme": t => requestRedeemTheme(t.getAttribute("data-theme-id")),
+  "use-theme": t => useTheme(t.getAttribute("data-theme-id")),
   "open-weekly": () => openWeeklyReport(),
   "close-weekly": () => closeWeeklyReport(),
   "weekly-prev": () => shiftWeekly(-1),
@@ -3096,6 +3230,9 @@ var __APP__ = {
   depositToPiggy: depositToPiggy, withdrawFromPiggy: withdrawFromPiggy,
   settlePiggyInterest: settlePiggyInterest, renderPiggyBank: renderPiggyBank,
   promptPiggyDeposit: promptPiggyDeposit, promptPiggyWithdraw: promptPiggyWithdraw, promptPiggyRate: promptPiggyRate,
+  defaultThemes: defaultThemes, findTheme: findTheme, themeOwned: themeOwned,
+  useTheme: useTheme, redeemTheme: redeemTheme, requestRedeemTheme: requestRedeemTheme, renderThemeShop: renderThemeShop,
+  get pendingThemeId(){ return pendingThemeId; }, set pendingThemeId(v){ pendingThemeId = v; },
   get wheelSpinning(){ return WHEEL_SPINNING; }, set wheelSpinning(v){ WHEEL_SPINNING = v; },
   get wheelRotation(){ return WHEEL_ROTATION; }, set wheelRotation(v){ WHEEL_ROTATION = v; },
   get heatOffset(){ return heatOffset; }, set heatOffset(v){ heatOffset = v; },
