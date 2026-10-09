@@ -161,6 +161,8 @@
   /* FR-33：审批码输入是从家长中心/商店等浮层「层内」唤起的通用对话框，必须压在唤起它的浮层之上，
      否则 DOM 序靠前的 #pinEntry 会被 #parentHub 遮住，家长点「批准」后无法输入审批码。 */
   #pinEntry{ z-index:60; }
+  /* FR-27：盲盒奖池编辑同样从家长中心唤起，DOM 序在 #parentHub 之前，须显式压顶，否则被遮 */
+  #lotteryEditor{ z-index:60; }
   .sheet{
     background:#fff; border-radius:18px; padding:20px; width:100%; max-width:420px;
     box-shadow:0 10px 40px rgba(0,0,0,.25); max-height:86vh; overflow:auto;
@@ -393,24 +395,35 @@
     <div id="theme-list"></div>
     <button class="btn green" data-act="open-pinset" style="margin-top:6px;width:100%">🔐 家长设置 · 审批码</button>
     <p class="hint">说明：孩子兑换奖励须输入家长设置的审批码，工具只负责记账，现实活动（看电视 / 玩游戏 / 出游等）仍由家长线下确认是否放行。</p>
-    <button class="btn green" data-act="open-wheel" style="margin-top:8px;width:100%;background:#f2994a;color:#fff">🎡 阳光转盘抽奖（50☀️/次）</button>
+    <button class="btn green" id="wheelEntryBtn" data-act="open-wheel" style="margin-top:8px;width:100%;background:#f2994a;color:#fff">🎡 惊喜盲盒抽奖（10☀️/次）</button>
   </div>
 </div>
 
 <div class="overlay" id="wheelDialog">
   <div class="sheet" style="max-width:360px">
     <button class="close" data-act="close-wheel">×</button>
-    <h2>🎡 阳光转盘</h2>
+    <h2>🎡 惊喜盲盒</h2>
     <div class="wheel-wrap">
       <div class="wheel-box">
         <div class="wheel-pointer"></div>
         <canvas id="wheelCanvas" class="wheel-disc" width="280" height="280"></canvas>
         <div class="wheel-center">GO</div>
       </div>
-      <div class="wheel-cost">每次消耗 50 ☀️ · 必中惊喜奖品</div>
+      <div class="wheel-cost" id="wheelCost">每次消耗 10 ☀️ · 惊喜盲盒</div>
       <div class="wheel-result" id="wheelResult"></div>
       <button class="btn green" data-act="spin-wheel" id="spinBtn" style="width:100%">开始抽奖</button>
     </div>
+  </div>
+</div>
+
+<!-- FR-27 家长奖池编辑：行文本整池重建，保存时原子校验概率总和 -->
+<div class="overlay" id="lotteryEditor">
+  <div class="sheet" style="max-width:420px">
+    <button class="close" data-act="close-lottery-editor">×</button>
+    <h2>🎡 惊喜盲盒 · 奖池配置</h2>
+    <p class="hint">每行一个奖品：<b>名称|图标|概率%|每人限购|记账型</b>（限购/记账可留空，记账型填 1=中奖写流水待家长兑现）。行首加 <b>*</b> 为「谢谢参与」空奖位（中签无奖励），至少 2 条；概率总和必须等于 100%。</p>
+    <textarea id="lotteryPoolText" spellcheck="false" style="width:100%;min-height:180px;margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:10px;font-size:13px;line-height:1.7;background:var(--card);color:var(--ink);box-sizing:border-box;font-family:inherit"></textarea>
+    <button class="btn green" data-act="save-lottery-pool" style="width:100%;margin-top:10px">保存奖池</button>
   </div>
 </div>
 
@@ -484,6 +497,8 @@
     <button class="btn" data-act="open-stats" style="width:100%;margin-top:8px;background:#f2994a;color:#fff">📊 学习统计</button>
     <button class="btn" data-act="piggy-rate" style="width:100%;margin-top:8px;background:#ffb84d;color:#5a3d00">🐷 存钱罐周利率设置（0~10%）</button>
     <button class="btn" data-act="piggy-penalty" style="width:100%;margin-top:8px;background:#ffb84d;color:#5a3d00">🐷 存钱罐提前取出惩罚</button>
+    <button class="btn" data-act="lottery-cost" style="width:100%;margin-top:8px;background:#f2994a;color:#fff">🎡 惊喜盲盒抽奖价格</button>
+    <button class="btn" data-act="open-lottery-editor" style="width:100%;margin-top:8px;background:#f2994a;color:#fff">🎡 惊喜盲盒奖池配置（概率/限购）</button>
     <button class="btn" data-act="open-weekly" style="width:100%;margin-top:8px;background:#6c5ce7;color:#fff">📅 每周周报</button>
     <button class="btn" data-act="open-race" style="width:100%;margin-top:8px;background:#e67e22;color:#fff">🏁 专注挑战赛</button>
     <button class="btn" data-act="open-sync" style="width:100%;margin-top:8px;background:#3aa76d;color:#fff">☁️ 云同步设置（WebDAV）</button>
@@ -1059,6 +1074,21 @@ function defaultRewards(){
 function defaultLevels(){
   return clone(LEVELS).map((l,i)=>({ id:"lv"+i, min:l.min, name:l.name }));
 }
+/* FR-27 惊喜盲盒奖池：与兑换商店（state.rewards）彻底独立——商店是「攒分换确定性奖励」，
+   盲盒是「花小钱碰运气」，共用结构会让概率/限购语义污染兑换体验。
+   prob 为百分比权重（保存时强制总和=100）；perChildLimit=null 不限；
+   kind:"none" 是「谢谢参与」空奖位（中签无奖励），为 PRD 对冲赌博暗示的兜底设计，默认固定 2 条 */
+function defaultLottery(){
+  return {
+    cost: 10,
+    prizes: [
+      { id:"lp_none_1",   title:"谢谢参与",     icon:"💧", prob:30, perChildLimit:null, kind:"none",   ledger:false },
+      { id:"lp_none_2",   title:"再接再厉",     icon:"🍂", prob:30, perChildLimit:null, kind:"none",   ledger:false },
+      { id:"lp_homework", title:"免作业一次",   icon:"📝", prob:20, perChildLimit:1,    kind:"reward", ledger:true },
+      { id:"lp_cartoon",  title:"多看一集动画", icon:"📺", prob:20, perChildLimit:2,    kind:"reward", ledger:true }
+    ]
+  };
+}
 /* FR-31 成就徽章目录：SRS 首批 12 枚，全部由既有数据/累计计数离线聚合判定；
    金级 3 枚可佩戴（佩戴位 1 个），倍率只作用于任务完成得分 */
 const BADGES = [
@@ -1150,6 +1180,7 @@ function buildChild(name, grade, pin){
     piggyBank:{ weeklyRate:0.02, earlyPenalty:0, deposits:[] },
     badges:{ earned:{}, equipped:null },
     requests:[],
+    lotteryWins:{},   // FR-27 每人中奖计数：按奖池条目 id 记次，驱动 perChildLimit 限购剔除
     badgeStats:{ totalEarned:0, taskDone:0, redeemCount:0, piggyInterest:false, lotteryWin:false }
   };
 }
@@ -1161,6 +1192,7 @@ function buildDefaultState(){
     childMode:false,
     sound:{ enabled:true, volume:0.6 },
     rewards: defaultRewards(),
+    lottery: defaultLottery(),
     themes: defaultThemes(),
     ownedThemes: ["light","dark"],
     levels: defaultLevels(),
@@ -1359,6 +1391,24 @@ function ensureIds(){
   }
   const themeOk = state.themes.some(t=>t.id===state.theme) && state.ownedThemes.indexOf(state.theme) >= 0;
   if(!themeOk) state.theme = (state.ownedThemes.indexOf("light") >= 0) ? "light" : state.ownedThemes[0];
+  // FR-27 惊喜盲盒池迁移：旧档案无独立奖池则整体补默认（含 2 条空奖位）；
+  // 字段脏值逐项回落，概率总和不在这里强制（那是保存动作的校验职责），抽样按实际权重归一，坏数据不影响可玩性
+  if(!state.lottery || typeof state.lottery !== "object" || !Array.isArray(state.lottery.prizes) || !state.lottery.prizes.length) state.lottery = defaultLottery();
+  else {
+    const L = state.lottery;
+    if(typeof L.cost !== "number" || isNaN(L.cost) || L.cost < 0) L.cost = 10;
+    L.cost = Math.min(99999, Math.floor(L.cost));
+    L.prizes = L.prizes.filter(p=>p && typeof p === "object" && typeof p.prob === "number" && !isNaN(p.prob));
+    L.prizes.forEach((p,i)=>{
+      if(typeof p.id !== "string" || !p.id) p.id = "lp"+Date.now().toString(36)+i;
+      if(typeof p.title !== "string" || !p.title.trim()) p.title = "奖品";
+      if(typeof p.icon !== "string" || !p.icon) p.icon = "🎁";
+      p.prob = Math.max(0, Math.min(100, p.prob));
+      if(p.perChildLimit !== null && (typeof p.perChildLimit !== "number" || isNaN(p.perChildLimit) || p.perChildLimit < 1)) p.perChildLimit = null;
+      if(p.kind !== "none" && p.kind !== "reward") p.kind = "reward";
+      p.ledger = !!p.ledger;
+    });
+  }
   if(!state.rewards) state.rewards = defaultRewards();
   else state.rewards.forEach(r=>{
     if(!r.id) r.id = "rw"+Date.now().toString(36)+Math.floor(Math.random()*1000);
@@ -1414,6 +1464,7 @@ function ensureIds(){
           .map(d => ({ amount: Math.floor(d.amount), date: d.date }));
       }
       delete c.piggyBank.balance; delete c.piggyBank.lastInterestDate;  // 旧字段使命结束，避免新旧两套口径并存
+      if(!c.lotteryWins || typeof c.lotteryWins !== "object") c.lotteryWins = {};   // FR-27 每人中奖计数，缺失按从未中过处理
     }
     // FR-31 徽章拥有态与累计赚取统计兼容
     normalizeBadgeFields(c);
@@ -2345,6 +2396,8 @@ function renderStore(){
   renderPiggyBank();
   renderThemeShop();
   renderMyRequests();
+  const wb = document.getElementById("wheelEntryBtn");   // FR-27：入口价格随家长配置即时刷新
+  if(wb) wb.textContent = "🎡 惊喜盲盒抽奖（" + state.lottery.cost + "☀️/次）";
   const list = document.getElementById("reward-list");
   if(!list) return;
   list.innerHTML = state.rewards.map(r=>{
@@ -2360,9 +2413,36 @@ function renderStore(){
       '</div></div>';
   }).join("");
 }
-/* ---------- FR-27 阳光转盘抽奖（纯 Canvas + CSS 缓动，零依赖） ---------- */
+/* ---------- FR-27 惊喜盲盒（独立奖池 + 概率加权抽样，纯 Canvas + CSS 缓动，零依赖） ---------- */
 var WHEEL_SPINNING = false;
 var WHEEL_ROTATION = 0; // 累计旋转角度（deg）
+
+/* 有效奖池：kind:"none" 空奖位恒在（无限购语义，兜底参与抽签但不发奖）；
+   reward 类按「该孩子累计中奖次数达 perChildLimit」剔除——这是 PRD 的每人限购维度，
+   与商店库存（全局限量）是两套口径，不可混用 */
+function lotteryEffectivePool(child){
+  const prizes = (state.lottery && Array.isArray(state.lottery.prizes)) ? state.lottery.prizes : [];
+  const wins = (child && child.lotteryWins) || {};
+  return prizes.filter(p=>{
+    if(p.kind === "none") return true;
+    if(p.perChildLimit === null || p.perChildLimit === undefined) return true;
+    return (wins[p.id] || 0) < p.perChildLimit;
+  });
+}
+
+/* 概率加权抽样：prob 即百分比权重，按实际总和归一（保存时已校验=100，这里再归一可容忍脏数据）；
+   rng 参数化便于测试固定分布，线上缺省用本地 Math.random（PRD：无外部随机源依赖） */
+function pickLotteryPrize(pool, rng){
+  const rand = (typeof rng === "function") ? rng : Math.random;
+  const total = pool.reduce((s,p)=>s+(p.prob||0), 0);
+  if(total <= 0) return 0;   // 全 0 权重退化为第一项——仅配置被外部篡改时出现
+  let r = rand() * total;
+  for(let i=0;i<pool.length;i++){
+    r -= (pool[i].prob||0);
+    if(r < 0) return i;
+  }
+  return pool.length - 1;   // 浮点累减误差吃掉尾部权重时归末项
+}
 
 function drawWheelCanvas(prizes){
   const canvas = document.getElementById("wheelCanvas");
@@ -2401,62 +2481,81 @@ function openWheelDialog(){
   const c = cur(); if(!c) return;
   const dialog = document.getElementById("wheelDialog");
   if(!dialog) return;
-  const prizes = state.rewards.filter(r => r.stock === null || r.stock > 0);
-  if(prizes.length === 0){ toast("暂无可抽奖品"); return; }
+  const prizes = lotteryEffectivePool(c);
+  if(prizes.length === 0){ toast("奖池为空，请家长先配置"); return; }
   drawWheelCanvas(prizes);
   document.getElementById("wheelResult").textContent = "";
-  document.getElementById("spinBtn").disabled = (c.sunshine < 50);
+  const cost = state.lottery.cost;
+  document.getElementById("wheelCost").textContent = "每次消耗 " + cost + " ☀️ · 惊喜盲盒";
+  document.getElementById("spinBtn").disabled = (c.sunshine < cost);
   dialog.classList.add("show");
 }
 
 function spinWheel(){
   if(WHEEL_SPINNING) return;
   const c = cur(); if(!c) return;
-  if(c.sunshine < 50){ toast("阳光值不足 50☀️"); return; }
-  
-  const prizes = state.rewards.filter(r => r.stock === null || r.stock > 0);
-  if(prizes.length === 0){ toast("暂无可抽奖品"); return; }
-  
+  const cost = state.lottery.cost;
+  if(c.sunshine < cost){ toast("阳光值不足 " + cost + "☀️"); return; }
+
+  const prizes = lotteryEffectivePool(c);
+  if(prizes.length === 0){ toast("奖池为空，请家长先配置"); return; }
+
   WHEEL_SPINNING = true;
-  addSunshine(-50, "lottery", "转盘抽奖消耗");
+  addSunshine(-cost, "lottery", "惊喜盲盒消耗");
+
+  // 限购剔除后概率重新归一：本次有效池的实际归一概率写进导出 meta（PRD §5 FR-27.4），
+  // 家长导出档案即可审计「孩子这次抽奖时每个奖的真实概率」
+  if(prizes.length < state.lottery.prizes.length){
+    const total = prizes.reduce((s,p)=>s+(p.prob||0), 0);
+    const probs = {};
+    prizes.forEach(p=>{ probs[p.id] = total > 0 ? Math.round((p.prob||0)/total*10000)/100 : 0; });
+    state.meta.lotteryNorm = { date: todayStr(), childId: c.id, probs: probs };
+  }
+
   save(); renderTopbar();
-  
+
   const canvas = document.getElementById("wheelCanvas");
   const btn = document.getElementById("spinBtn");
   btn.disabled = true;
-  
-  // 随机选中一个奖品
-  const idx = Math.floor(Math.random() * prizes.length);
+
+  // 结果预先由概率加权确定，动画只负责把指针缓动送到该扇区（PRD §5 FR-27.3）
+  const idx = pickLotteryPrize(prizes);
   const prize = prizes[idx];
-  
-  // 计算目标角度：每个扇区 360/n 度，指针在顶部（-90°），需要让选中扇区中心对准顶部
+
   const n = prizes.length;
   const sectorDeg = 360 / n;
-  // 选中扇区的中心角度（相对于初始位置）
   const targetSectorCenter = idx * sectorDeg + sectorDeg/2;
-  // 需要旋转的角度 = 多圈(5圈) + 让目标扇区对准顶部
   const extraSpins = 5 * 360;
   const finalRotation = WHEEL_ROTATION + extraSpins + (360 - targetSectorCenter);
-  
+
   canvas.style.transform = "rotate(" + finalRotation + "deg)";
   WHEEL_ROTATION = finalRotation;
-  
-  setTimeout(()=>{
-    WHEEL_SPINNING = false;
-    btn.disabled = false;
-    
-    // 扣减库存
-    if(prize.stock !== null && typeof prize.stock === "number"){
-      prize.stock = Math.max(0, prize.stock - 1);
-    }
-    
-    document.getElementById("wheelResult").textContent = "🎉 恭喜获得：" + prize.title;
-    celebrate({ type:"lottery", level:"full", text:"转盘抽中「"+prize.title+"」！" });   // FR-32：中奖用全量档
-    playChime("redeem");   // FR-34：中奖与兑换共用琶音
-    const cc = cur();
-    if(cc && cc.badgeStats){ cc.badgeStats.lotteryWin = true; }   // FR-31 转盘首中
-    save(); renderStore(); evaluateBadges();
-  }, 2400); // 略大于 CSS transition 时间（PRD：缓动停针 1.5~2.5s）
+
+  setTimeout(()=>{ settleLotterySpin(prize); }, 2400); // 略大于 CSS transition 时间（PRD：缓动停针 1.5~2.5s）
+}
+
+/* 抽签落定：空奖位只给文案（不发奖/不记账/不点亮中奖徽章）；
+   记账型（ledger）中奖写 amount=0 流水供家长对账、线下兑现——
+   PRD 风险条款要求奖品全部是现实奖励记账，不产生虚拟囤积 */
+function settleLotterySpin(prize){
+  WHEEL_SPINNING = false;
+  const btn = document.getElementById("spinBtn");
+  if(btn) btn.disabled = false;
+  const c = cur(); if(!c) return;
+
+  const res = document.getElementById("wheelResult");
+  if(prize.kind === "none"){
+    if(res) res.textContent = prize.icon + " " + prize.title + "，下次再来～";
+    return;   // 空奖位无任何状态变化，不必落盘
+  }
+  c.lotteryWins = c.lotteryWins || {};
+  c.lotteryWins[prize.id] = (c.lotteryWins[prize.id] || 0) + 1;
+  if(res) res.textContent = "🎉 恭喜获得：" + prize.title;
+  if(prize.ledger) pushLedger("lottery", 0, "盲盒中奖「" + prize.title + "」（待家长兑现）");
+  celebrate({ type:"lottery", level:"full", text:"抽中「"+prize.title+"」！" });   // FR-32：中奖用全量档
+  playChime("redeem");   // FR-34：中奖与兑换共用琶音
+  if(c.badgeStats){ c.badgeStats.lotteryWin = true; }   // FR-31 转盘首中
+  save(); renderStore(); evaluateBadges();
 }
 
 /* ---------- FR-30 存钱罐与利息（财商教育：储蓄 vs 即时消费，周利率家长可配） ---------- */
@@ -2604,6 +2703,79 @@ async function promptPiggyPenalty(){
   c.piggyBank.earlyPenalty = on ? 0 : 10;
   save();
   toast(c.piggyBank.earlyPenalty === 10 ? "已开启：提前取出扣 10%" : "已改回：原额取出");
+}
+
+/* ---------- FR-27 家长配置：盲盒价格与奖池 ---------- */
+async function promptLotteryCost(){
+  const cur = (state.lottery && state.lottery.cost) || 10;
+  const v = await showPrompt("单次盲盒价格（☀️，0~99999，0=免费）：", String(cur), { numeric:true });
+  if(v === null || v === "") return;
+  const n = Math.floor(Number(v));
+  if(isNaN(n) || n < 0 || n > 99999){ toast("请输入 0~99999 的整数"); return; }
+  state.lottery.cost = n;
+  save(); renderStore();   // 价格改配即时生效：入口文案同步刷新
+  toast("盲盒价格已改为 " + n + "☀️");
+}
+
+/* 奖池编辑采用「行文本 + 竖线分隔」而非逐字段表单：奖池是低频配置，
+   行式编辑可整池一次重建，也天然满足「保存时整体校验概率总和=100」的原子性 */
+function lotteryPoolText(){
+  const ps = (state.lottery && state.lottery.prizes) || [];
+  return ps.map(p=>
+    (p.kind==="none"?"*":"") + p.title + "|" + p.icon + "|" + p.prob +
+    "|" + (p.perChildLimit===null||p.perChildLimit===undefined?"":p.perChildLimit) +
+    "|" + (p.ledger?"1":"")
+  ).join("\n");
+}
+
+function parseLotteryPool(text){
+  const lines = String(text||"").split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  if(lines.length < 3) return { err:"奖池至少 3 行（须含 2 条空奖位）" };
+  const prizes = []; let noneCount = 0; let total = 0;
+  for(let i=0;i<lines.length;i++){
+    const raw = lines[i];
+    const isNone = raw.charAt(0) === "*";
+    const parts = (isNone ? raw.slice(1) : raw).split("|").map(s=>s.trim());
+    if(parts.length < 3 || parts.length > 5) return { err:"第 "+(i+1)+" 行格式：名称|图标|概率%|每人限购|记账型（后两项可留空）" };
+    const title = parts[0];
+    if(!title) return { err:"第 "+(i+1)+" 行缺奖品名" };
+    const prob = Number(parts[2]);
+    if(isNaN(prob) || prob < 0 || prob > 100) return { err:"第 "+(i+1)+" 行概率须为 0~100 的数字" };
+    let limit = null;
+    if(parts[3]){
+      limit = Number(parts[3]);
+      if(isNaN(limit) || limit < 1 || Math.floor(limit) !== limit) return { err:"第 "+(i+1)+" 行限购须为正整数或留空" };
+    }
+    if(isNone) noneCount++;
+    total += prob;
+    prizes.push({ title:title, icon:parts[1]||"🎁", prob:prob, perChildLimit:limit, kind:isNone?"none":"reward", ledger:parts[4]==="1" });
+  }
+  if(noneCount < 2) return { err:"空奖位（行首 * ）至少 2 条" };
+  if(Math.abs(total - 100) > 1e-6) return { err:"概率总和须为 100%，当前 " + (Math.round(total*1000)/1000) + "%" };
+  return { prizes:prizes };
+}
+
+function openLotteryEditor(){
+  const dlg = document.getElementById("lotteryEditor");
+  if(!dlg) return;
+  document.getElementById("lotteryPoolText").value = lotteryPoolText();
+  dlg.classList.add("show");
+}
+
+function saveLotteryPool(){
+  const r = parseLotteryPool(document.getElementById("lotteryPoolText").value);
+  if(r.err){ toast(r.err); return; }
+  // 编辑文本不含 id；同名奖品继承旧 id，让 perChildLimit 中奖计数跨编辑延续
+  const oldByIdTitle = {};
+  ((state.lottery && state.lottery.prizes) || []).forEach(p=>{ oldByIdTitle[p.title] = p.id; });
+  let seq = 0;
+  state.lottery.prizes = r.prizes.map(p=>{
+    const id = oldByIdTitle[p.title] || ("lp"+Date.now().toString(36)+(seq++));
+    return { id:id, title:p.title, icon:p.icon, prob:p.prob, perChildLimit:p.perChildLimit, kind:p.kind, ledger:p.ledger };
+  });
+  save();
+  document.getElementById("lotteryEditor").classList.remove("show");
+  toast("奖池已保存（共 " + state.lottery.prizes.length + " 项）");
 }
 /* ---------- N4 学习统计（家长报表可视化，纯 CSS，零依赖） ---------- */
 function dayKeyLocal(d){
@@ -3749,6 +3921,10 @@ const DISPATCH = {
   "open-wheel": () => openWheelDialog(),
   "close-wheel": () => document.getElementById("wheelDialog").classList.remove("show"),
   "spin-wheel": () => spinWheel(),
+  "lottery-cost": () => promptLotteryCost(),
+  "open-lottery-editor": () => openLotteryEditor(),
+  "close-lottery-editor": () => document.getElementById("lotteryEditor").classList.remove("show"),
+  "save-lottery-pool": () => saveLotteryPool(),
   "piggy-deposit": () => promptPiggyDeposit(),
   "piggy-withdraw": () => promptPiggyWithdraw(),
   "piggy-rate": () => promptPiggyRate(),
@@ -3950,6 +4126,9 @@ var __APP__ = {
   openStats: openStats, closeStats: closeStats,
   buildHeatmapHTML: buildHeatmapHTML, heatCellClick: heatCellClick,
   openWheelDialog: openWheelDialog, spinWheel: spinWheel, drawWheelCanvas: drawWheelCanvas,
+  lotteryEffectivePool: lotteryEffectivePool, pickLotteryPrize: pickLotteryPrize, settleLotterySpin: settleLotterySpin,
+  defaultLottery: defaultLottery, lotteryPoolText: lotteryPoolText, parseLotteryPool: parseLotteryPool,
+  promptLotteryCost: promptLotteryCost, openLotteryEditor: openLotteryEditor, saveLotteryPool: saveLotteryPool,
   depositToPiggy: depositToPiggy, withdrawFromPiggy: withdrawFromPiggy,
   settlePiggyInterest: settlePiggyInterest, renderPiggyBank: renderPiggyBank,
   piggyBalanceOf: piggyBalanceOf, piggyDaysToNextInterest: piggyDaysToNextInterest,

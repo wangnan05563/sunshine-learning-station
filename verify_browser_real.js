@@ -655,14 +655,43 @@ function floatProbe(){
   await shot("07c_parent_hub.png");
   await closeAll();
 
-  section("P1 FR-27 阳光转盘（Canvas 像素 + 缓动停针 + 记账）");
+  section("P1 FR-27 惊喜盲盒（独立奖池 + 概率加权 + 记账）");
   await closeAll();
-  await A(() => window.__STUDY_APP__.addSunshine(600, "test_seed", "转盘充值"));
+  // 家长配置链路：先改价，再存 100% 单奖品池（空奖位概率 0 合法），让抽奖结果可预测
+  await page.locator('[data-act="open-parent-hub"]').click();
+  await page.waitForTimeout(250);
+  await page.locator('[data-act="lottery-cost"]').click();
+  await page.waitForTimeout(200);
+  await page.locator("#promptInput").fill("12");
+  await page.locator('[data-act="prompt-ok"]').click();
+  await page.waitForTimeout(200);
+  check("家长改价 12☀️ 即时生效", await A(() => window.__STUDY_APP__.state.lottery.cost === 12));
+  await page.locator('[data-act="open-lottery-editor"]').click();
+  await page.waitForTimeout(250);
+  const poolTextBefore = await A(() => document.getElementById("lotteryPoolText").value);
+  check("奖池编辑器打开并回填当前池文本", poolTextBefore.indexOf("谢谢参与") >= 0 && poolTextBefore.split("\n").length >= 4, poolTextBefore);
+  await page.locator("#lotteryPoolText").fill("*谢谢参与|💧|0|\n*再接再厉|🍂|0|\n免作业一次|📝|100||1");
+  await page.locator('[data-act="save-lottery-pool"]').click();
+  await page.waitForTimeout(250);
+  check("合法池保存成功（100% 单奖品）", await A(() => { const ps = window.__STUDY_APP__.state.lottery.prizes; return ps.length === 3 && ps[2].prob === 100; }));
+  await page.locator('[data-act="open-lottery-editor"]').click();
+  await page.waitForTimeout(200);
+  await page.locator("#lotteryPoolText").fill("A|🎁|60||1\nB|🎉|60||1");
+  await page.locator('[data-act="save-lottery-pool"]').click();
+  await page.waitForTimeout(200);
+  check("概率总和≠100% 拒绝写入", await A(() => window.__STUDY_APP__.state.lottery.prizes.length === 3));
+  await page.locator('[data-act="close-lottery-editor"]').click();
+  await page.waitForTimeout(150);
+  await closeAll();
+  await page.waitForTimeout(150);
   await page.locator('[data-act="open-store"]').click();
   await page.waitForTimeout(250);
+  await A(() => window.__STUDY_APP__.addSunshine(600, "test_seed", "盲盒测试充值"));
+  check("商店入口价格随配置显示 12☀️", await A(() => document.getElementById("wheelEntryBtn").textContent.indexOf("12") >= 0));
   await page.locator('[data-act="open-wheel"]').click();
   await page.waitForTimeout(300);
   check("转盘浮层打开", await A(() => document.getElementById("wheelDialog").classList.contains("show")));
+  check("浮层内价格文案同步为配置价", await A(() => document.getElementById("wheelCost").textContent.indexOf("12") >= 0));
   const canvasPixels = await A(() => {
     const cv = document.getElementById("wheelCanvas");
     const cx = cv.getContext("2d");
@@ -671,7 +700,7 @@ function floatProbe(){
     for (let i = 0; i < d.length; i += 4){ if (d[i + 3] > 0){ nonEmpty++; set[d[i] + "," + d[i + 1] + "," + d[i + 2]] = 1; } }
     return { w: cv.width, h: cv.height, nonEmpty, colors: Object.keys(set).length };
   });
-  check("Canvas 扇区已绘制（多色、非空白）", canvasPixels.colors >= 5 && canvasPixels.nonEmpty > 50000, JSON.stringify(canvasPixels));
+  check("Canvas 扇区已绘制（多色、非空白）", canvasPixels.colors >= 3 && canvasPixels.nonEmpty > 50000, JSON.stringify(canvasPixels));
   const trans = await A(() => { const cv = document.getElementById("wheelCanvas"); const cs = getComputedStyle(cv); return { prop: cs.transitionProperty, dur: cs.transitionDuration, cls: cv.className }; });
   note("canvas 计算样式 transition：" + JSON.stringify(trans));
   const wheelSunBefore = await sunshine();
@@ -682,13 +711,14 @@ function floatProbe(){
   await page.waitForTimeout(4000);
   const endTransform = await A(() => getComputedStyle(document.getElementById("wheelCanvas")).transform);
   const wheelAfter = await A(() => ({ sun: window.__STUDY_APP__.cur().sunshine, res: document.getElementById("wheelResult").textContent, disabled: document.getElementById("spinBtn").disabled, spinning: window.__STUDY_APP__.wheelSpinning, win: !!window.__STUDY_APP__.cur().badgeStats.lotteryWin || !!window.__STUDY_APP__.cur().badges.earned.lottery_first }));
-  check("抽奖立即扣 50☀️ 并写 lottery 流水", wheelSunBefore - wheelAfter.sun === 50 && await A(() => window.__STUDY_APP__.cur().ledger.some(e => e.type === "lottery")), wheelSunBefore + "→" + wheelAfter.sun);
+  check("抽奖按配置价扣 12☀️ 并写扣费流水", wheelSunBefore - wheelAfter.sun === 12 && await A(() => window.__STUDY_APP__.cur().ledger.some(e => e.type === "lottery" && e.amount === -12)), wheelSunBefore + "→" + wheelAfter.sun);
   check("转动期间按钮禁用（防重复扣费）", btnDisabled === true);
   check("停针后出结果文案且按钮恢复", /恭喜获得/.test(wheelAfter.res) && wheelAfter.disabled === false && wheelAfter.spinning === false, JSON.stringify(wheelAfter));
   check("缓动停针动画真实存在（中途矩阵 ≠ 结束矩阵）", midTransform !== endTransform && midTransform !== "none", "mid=" + midTransform + " end=" + endTransform);
   const spinMs = await A(() => { const cv = document.getElementById("wheelCanvas"); const cs = getComputedStyle(cv); return cs.transitionDuration; });
   soft("停针时长在 PRD 1.5~2.5s 区间", parseFloat(spinMs) >= 1.5 && parseFloat(spinMs) <= 2.5, "transition-duration=" + spinMs);
   check("转盘首中徽章自动点亮", wheelAfter.win === true);
+  check("中奖计数 +1 且写 0 额兑现流水", await A(() => { const c = window.__STUDY_APP__.cur(); return (c.lotteryWins["lp_homework"] || 0) === 1 && c.ledger.some(e => e.type === "lottery" && e.amount === 0 && e.note.indexOf("免作业") >= 0); }));
   await shot("08_wheel_result.png");
 
   section("P2 FR-33 兑换待批准队列（申请→批准/拒绝/余额不足）");
