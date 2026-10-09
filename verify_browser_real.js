@@ -287,9 +287,10 @@ function floatProbe(){
   check("点击格子 → 当日完成数提示", await A(() => /完成|无打卡/.test(document.getElementById("heatHint").textContent)), await A(() => document.getElementById("heatHint").textContent));
   await shot("03_heatmap_stats.png");
 
-  section("P1 FR-31 徽章墙（达成点亮 / 排版 / 金级佩戴倍率）");
+  section("P1 FR-31 徽章墙（家长只读 / 孩子端入口佩戴 / 倍率可解释 / 窄屏不溢出）");
+  // —— 承接上段打开的 statsDialog：家长统计页徽章墙为只读视图（T01683 起佩戴动作迁移至孩子端） ——
   const badgeInfo = await A(() => {
-    const wall = document.querySelector(".badge-wall");
+    const wall = document.querySelector("#statsDialog .badge-wall");
     if (!wall) return null;
     const tiles = [...wall.querySelectorAll(".badge-tile")];
     const body = document.getElementById("statsBody");
@@ -297,63 +298,111 @@ function floatProbe(){
     return { n: tiles.length, off: tiles.filter(t => t.classList.contains("badge-off")).length, got: tiles.filter(t => !t.classList.contains("badge-off")).length, gold: tiles.filter(t => t.classList.contains("badge-gold")).length, cols: getComputedStyle(wall).gridTemplateColumns.split(" ").length, overflowX: body.scrollWidth - body.clientWidth, wallW: Math.round(wall.scrollWidth) + "/" + Math.round(wall.clientWidth), sheetOverflowX: sheet.scrollWidth - sheet.clientWidth, docOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     culprits: (() => { const lim = body.getBoundingClientRect().right; return [...body.querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > lim + 1).slice(0, 5).map(e => ((e.className && String(e.className).split(" ")[0]) || e.tagName) + "@" + Math.round(e.getBoundingClientRect().right - lim) + "px"); })(), tileW: Math.round(tiles[0].getBoundingClientRect().width), tileH: Math.round(tiles[0].getBoundingClientRect().height), minMax: getComputedStyle(wall).gridTemplateColumns.split(" ").slice(0, 2), head: wall.previousElementSibling.textContent };
   });
-  check("徽章墙 12 枚全部渲染", badgeInfo && badgeInfo.n === 12, JSON.stringify(badgeInfo));
+  check("家长统计页徽章墙 12 枚全部渲染", badgeInfo && badgeInfo.n === 12, JSON.stringify(badgeInfo));
   check("已达成点亮 / 未达成置灰同时存在", badgeInfo && badgeInfo.got >= 2 && badgeInfo.off > 0, JSON.stringify(badgeInfo));
   check("墙面无用户可见横向溢出（对话框与文档均不产生横向滚动）", badgeInfo && badgeInfo.sheetOverflowX <= 1 && badgeInfo.docOverflow <= 1, "sheet overflowX=" + (badgeInfo && badgeInfo.sheetOverflowX) + " doc=" + (badgeInfo && badgeInfo.docOverflow) + "（statsBody 内框 +9 由卡片外边距产生，被 .sheet 内边距吸收）" + " sheet=" + (badgeInfo && badgeInfo.sheetOverflowX) + " wall=" + (badgeInfo && badgeInfo.wallW) + " 越界元素=" + JSON.stringify(badgeInfo && badgeInfo.culprits));
   soft("徽章格子尺寸适合阅读（≥80×70）", badgeInfo && badgeInfo.tileW >= 80 && badgeInfo.tileH >= 70, "tile=" + (badgeInfo && badgeInfo.tileW) + "×" + (badgeInfo && badgeInfo.tileH) + " 模板列=" + (badgeInfo && badgeInfo.minMax.join(",")));
   check("金级徽章 3 枚", badgeInfo && badgeInfo.gold === 3, JSON.stringify(badgeInfo));
-  // 佩戴：真实点击可佩戴的金级徽章，实测倍率 = floor(基础 × 1.5)
-  let goldClickable = await page.locator('.badge-tile.badge-gold[data-act="equip-badge"]').count();
-  if (goldClickable === 0){
-    // 用产品自己的记账入口把「累计赚取」推到金级门槛（等价于孩子再坚持若干天），随后走真实判定函数
-    const push = await A(() => {
-      const App = window.__STUDY_APP__, c = App.cur();
+  check("家长统计页为只读视图：金级徽章不输出佩戴交互", badgeInfo && (await A(() => document.querySelectorAll('#statsDialog [data-act="equip-badge"]').length)) === 0, "clickable=" + await A(() => document.querySelectorAll('#statsDialog [data-act="equip-badge"]').length));
+  check("家长视图文案声明佩戴由孩子在端上操作", await A(() => /家长侧只读视图/.test(document.getElementById("statsBody").textContent)));
+  await shot("04_badge_wall_readonly.png");
+
+  // —— 孩子端入口 → 徽章墙 → 佩戴 → 回到当日任务 → 阳光数值含加成 ——
+  await page.locator('[data-act="close-stats"]').click();
+  await page.waitForTimeout(200);   // openStats 打开时已移除 parentHub 的 show，关掉统计后直接回到孩子端
+  // 保证存在已获得的金级徽章：不足则用产品真实记账入口推进门槛（等价于孩子再坚持若干天）
+  const goldSeeded = await A(() => {
+    const App = window.__STUDY_APP__, c = App.cur();
+    let gold = Object.keys(c.badges.earned).filter(id => App.findBadge(id) && App.findBadge(id).gold);
+    if (!gold.length){
       App.addSunshine(2500, "test_seed", "回归测试：推进金级门槛");
-      App.evaluateBadges(); App.renderStats();
-      return { earned: c.badgeStats.totalEarned, gold: Object.keys(c.badges.earned).filter(id => App.findBadge(id) && App.findBadge(id).gold) };
+      App.evaluateBadges();
+      gold = Object.keys(c.badges.earned).filter(id => App.findBadge(id) && App.findBadge(id).gold);
+    }
+    return gold;
+  });
+  check("存在已获得的金级徽章（不足时经真实判定函数点亮）", goldSeeded.length >= 1, JSON.stringify(goldSeeded));
+  check("孩子端导航含「我的徽章」入口按钮", await A(() => !!document.querySelector('.nav [data-act="open-badge-wall"]')));
+  check("未佩戴时入口按钮不带倍率角标", await A(() => { const b = document.querySelector('.nav [data-act="open-badge-wall"]'); return b && !/×1\.5/.test(b.textContent); }));
+  await page.locator('.nav [data-act="open-badge-wall"]').click();
+  await page.waitForTimeout(250);
+  check("点击入口 → 孩子端徽章浮层打开", await A(() => document.getElementById("badgeDialog").classList.contains("show")));
+  const kidWall = await A(() => {
+    const dlg = document.getElementById("badgeDialog");
+    const tiles = [...dlg.querySelectorAll(".badge-tile")];
+    const sheet = dlg.querySelector(".sheet");
+    return { n: tiles.length, goldClickable: dlg.querySelectorAll('[data-act="equip-badge"]').length, sheetOX: sheet.scrollWidth - sheet.clientWidth, docOX: document.documentElement.scrollWidth - document.documentElement.clientWidth };
+  });
+  check("孩子端浮层渲染徽章墙且金级可佩戴（佩戴位仅 1 枚入口）", kidWall.n === 12 && kidWall.goldClickable >= 1, JSON.stringify(kidWall));
+  check("孩子端不出现家长只读文案（两端口径分离）", await A(() => !/家长侧只读视图/.test(document.getElementById("badgeWallBody").textContent)));
+  // 佩戴：真实点击浮层内的金级徽章
+  await page.locator('#badgeDialog [data-act="equip-badge"]').first().click();
+  await page.waitForTimeout(250);
+  const worn = await A(() => ({
+    eq: window.__STUDY_APP__.cur().badges.equipped,
+    wornTile: !!document.querySelector("#badgeDialog .badge-tile.badge-worn"),
+    wornHint: (document.querySelector("#badgeDialog .badge-worn .badge-hint") || {}).textContent,
+    navMark: (document.querySelector('.nav [data-act="open-badge-wall"]') || {}).textContent,
+    topbar: document.querySelector(".topbar").textContent
+  }));
+  check("孩子端点击金级 → 佩戴成功且浮层即时回显「佩戴中」", !!worn.eq && worn.wornTile && /佩戴中/.test(worn.wornHint || ""), JSON.stringify(worn));
+  check("佩戴后导航按钮即时带 ×1.5 角标", /×1\.5/.test(worn.navMark || ""), worn.navMark);
+  check("顶栏出现佩戴标识「佩戴 ×1.5」（加成对孩子可见可解释）", /佩戴 ×1\.5/.test(worn.topbar));
+  // 回到当日任务：关闭浮层后真实点击任务，实测实得分 = floor(5 × 1.5) = 7
+  await page.locator('#badgeDialog [data-act="close-badge-wall"]').last().click();
+  await page.waitForTimeout(200);
+  check("关闭浮层回到任务视图", await A(() => !document.getElementById("badgeDialog").classList.contains("show")));
+  const t0 = await A(() => {
+    const App = window.__STUDY_APP__;
+    // 从当前渲染面板取任务（FR-29 段跑完全天任务后当前学科不一定是 subjects[0]，以 DOM 为准才与可见视图一致）
+    const cb = document.querySelector('.content input[data-act="toggle"]');
+    if (!cb) return null;
+    const tid = cb.getAttribute("data-task");
+    let t = null;
+    App.cur().subjects.forEach(s => s.units.forEach(u => u.tasks.forEach(x => { if (x.id === tid) t = x; })));
+    if (t && t.done) App.toggleTask(t.id);   // 复位已完成项，保证点击必然产生一次正向得分
+    return tid;
+  });
+  const s0b = await sunshine();
+  await page.locator('input[data-task="' + t0 + '"]').check({ force: true });
+  await page.waitForTimeout(300);
+  const s1b = await sunshine();
+  check("佩戴期间真实点击任务 → 实得分 = floor(5×1.5)=7（阳光数值含加成）", s1b - s0b === 7, s0b + "→" + s1b + " delta=" + (s1b - s0b));
+  // 卸下：重开浮层点击已佩戴项
+  await page.locator('.nav [data-act="open-badge-wall"]').click();
+  await page.waitForTimeout(200);
+  await page.locator('#badgeDialog .badge-tile.badge-worn').first().click();
+  await page.waitForTimeout(250);
+  const back = await A(() => ({
+    eq: window.__STUDY_APP__.cur().badges.equipped,
+    navMark: (document.querySelector('.nav [data-act="open-badge-wall"]') || {}).textContent
+  }));
+  check("孩子端点击已佩戴徽章 → 卸下成功且角标消失", back.eq === null && !/×1\.5/.test(back.navMark || ""), JSON.stringify(back));
+  await page.locator('#badgeDialog [data-act="close-badge-wall"]').last().click();
+  await page.waitForTimeout(150);
+  await shot("05_badge_wall_kidmode.png");
+
+  // —— 窄屏（420×800）与移动视口（390×844）：孩子端徽章浮层不溢出 ——
+  for (const vp of [{ name: "narrow_420x800", width: 420, height: 800 }, { name: "mobile_390x844", width: 390, height: 844 }]){
+    const vc = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+    const vp2 = await vc.newPage();
+    hardenClick(vp2);
+    vp2.on("pageerror", e => errors.push(vp.name + " pageerror: " + e.message));
+    await vp2.goto(APP, { waitUntil: "load" });
+    await vp2.waitForTimeout(250);
+    await vp2.locator('.nav [data-act="open-badge-wall"]').click();
+    await vp2.waitForTimeout(200);
+    const ov = await vp2.evaluate(() => {
+      const dlg = document.getElementById("badgeDialog");
+      const sheet = dlg.querySelector(".sheet");
+      return { shown: dlg.classList.contains("show"), sheetOX: sheet.scrollWidth - sheet.clientWidth, docOX: document.documentElement.scrollWidth - document.documentElement.clientWidth };
     });
-    note("真实规则判定：累计赚取 " + push.earned + "☀️ 后点亮金级 " + JSON.stringify(push.gold));
-    goldClickable = await page.locator('.badge-tile.badge-gold[data-act="equip-badge"]').count();
+    check(vp.name + "：孩子端徽章浮层打开且无横向溢出", ov.shown && ov.sheetOX <= 1 && ov.docOX <= 1, JSON.stringify(ov));
+    await vp2.screenshot({ path: path.join(EVID, "05_badge_wall_" + vp.name + ".png") });
+    await vc.close();
   }
-  check("金级徽章点亮后出现可佩戴入口（佩戴位仅 1 枚）", goldClickable >= 1, "clickable=" + goldClickable);
-  if (goldClickable > 0){
-    // 先量基础分（未佩戴）
-    const base = await A(() => {
-      const App = window.__STUDY_APP__, c = App.cur(), t = c.subjects[0].units[0].tasks[0];
-      if (t.done) App.toggleTask(t.id);
-      const undo = c.sunshine;
-      App.toggleTask(t.id);
-      return c.sunshine - undo;
-    });
-    await page.locator('.badge-tile.badge-gold[data-act="equip-badge"]').first().click();
-    await page.waitForTimeout(250);
-    const worn = await A(() => ({ eq: window.__STUDY_APP__.cur().badges.equipped, cls: !!document.querySelector(".badge-tile.badge-worn"), hint: (document.querySelector(".badge-worn .badge-hint") || {}).textContent }));
-    check("点击金级徽章 → 佩戴成功且 UI 标记「佩戴中」", !!worn.eq && worn.cls && /佩戴中/.test(worn.hint || ""), JSON.stringify(worn));
-    const withMult = await A(() => {
-      const App = window.__STUDY_APP__, c = App.cur(), t = c.subjects[0].units[0].tasks[0];
-      if (t.done) App.toggleTask(t.id);
-      const undo = c.sunshine;
-      App.toggleTask(t.id);
-      return c.sunshine - undo;
-    });
-    check("佩戴期间任务得分 = floor(基础 × 1.5)", withMult === Math.floor(base * 1.5) && withMult > base, "base=" + base + " worn=" + withMult + " expect=" + Math.floor(base * 1.5));
-    await page.locator('.badge-tile.badge-worn').first().click();
-    await page.waitForTimeout(250);
-    const back = await A(() => {
-      const App = window.__STUDY_APP__, c = App.cur(), t = c.subjects[0].units[0].tasks[0];
-      if (t.done) App.toggleTask(t.id);
-      const undo = c.sunshine;
-      App.toggleTask(t.id);
-      return { got: c.sunshine - undo, eq: c.badges.equipped };
-    });
-    check("卸下徽章 → 得分立即恢复 1×", !back.eq && back.got === base, JSON.stringify(back));
-  } else {
-    soft("存在可佩戴的金级徽章（需真实达成 streak_100/sun_2000/task_200 之一）", false, "本轮真实数据未达金级门槛");
-  }
-  await shot("04_badge_wall.png");
 
   section("P1 FR-35 行为标签（编辑器 datalist / 角标 / 第三维筛选）");
-  await page.locator('[data-act="close-stats"]').click();
   await page.locator('[data-act="open-parent-hub"]').click();
   await page.waitForTimeout(200);
   await page.locator('#parentHub [data-act="open-editor"]').click();

@@ -347,6 +347,8 @@
   .piggy-actions button{ flex:1; }
   /* FR-31 成就徽章墙 */
   .badge-wall{ display:grid; grid-template-columns:repeat(auto-fill,minmax(96px,1fr)); gap:8px; }
+  /* FR-31 佩戴加成标记：任务行内联小字，解释实得分为何大于基础分 */
+  .sun-mult{ font-size:11px; color:#b8860b; font-weight:700; margin-left:4px; white-space:nowrap; }
   .badge-tile{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:8px 6px; text-align:center; }
   .badge-icon{ font-size:22px; line-height:1.2; }
   .badge-name{ font-size:12px; font-weight:700; margin-top:2px; }
@@ -424,6 +426,16 @@
     <p class="hint">每行一个奖品：<b>名称|图标|概率%|每人限购|记账型</b>（限购/记账可留空，记账型填 1=中奖写流水待家长兑现）。行首加 <b>*</b> 为「谢谢参与」空奖位（中签无奖励），至少 2 条；概率总和必须等于 100%。</p>
     <textarea id="lotteryPoolText" spellcheck="false" style="width:100%;min-height:180px;margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:10px;font-size:13px;line-height:1.7;background:var(--card);color:var(--ink);box-sizing:border-box;font-family:inherit"></textarea>
     <button class="btn green" data-act="save-lottery-pool" style="width:100%;margin-top:10px">保存奖池</button>
+  </div>
+</div>
+
+<!-- FR-31 孩子端「我的徽章」浮层：展示 + 佩戴（家长统计页为只读视图） -->
+<div class="overlay" id="badgeDialog">
+  <div class="sheet" style="max-width:420px">
+    <button class="close" data-act="close-badge-wall">×</button>
+    <h2>🏅 我的徽章</h2>
+    <div id="badgeWallBody"></div>
+    <button class="btn" data-act="close-badge-wall" style="width:100%;margin-top:10px">关闭</button>
   </div>
 </div>
 
@@ -1735,7 +1747,10 @@ function toggleEquipBadge(id){
   save();
   toast(c.badges.equipped ? ("已佩戴 "+b.icon+" "+b.title+"，任务阳光 ×"+BADGE_MULTIPLIER) : "已卸下徽章，任务阳光恢复 1×");
   const stats = document.getElementById("statsDialog");
-  if(stats && stats.classList.contains("show")) renderStats();
+  if(stats && stats.classList.contains("show")) renderStats();   // 家长统计页只读视图同步佩戴态
+  renderBadgeWall();   // 孩子端「我的徽章」浮层开着时即时回显，避免展示陈旧佩戴态
+  renderContent();     // 佩戴/卸下改变任务阳光加成，任务行的实得分须同步
+  renderNav();         // 导航按钮佩戴期间带 ×1.5 角标，不刷新会停留在陈旧倍率
   renderTopbar();
   return true;
 }
@@ -2317,6 +2332,7 @@ function renderTopbar(){
   const childOpts = state.children.map(ch=>
     '<option value="'+escapeHtml(ch.id)+'" '+(ch.id===state.activeChildId?"selected":"")+'>'+escapeHtml(ch.name)+'</option>'
   ).join("");
+  const eqBadge = (c.badges && c.badges.equipped) ? findBadge(c.badges.equipped) : null;   // FR-31：佩戴结果对孩子即时可见
   const el = document.querySelector(".topbar");
   el.innerHTML =
     '<div class="logo">🌞 阳光学习能量站</div>' +
@@ -2326,6 +2342,7 @@ function renderTopbar(){
     '<button class="pin-btn" data-act="open-parent-hub">👨‍👩‍👧 家长中心'+(pendingRequestCount(c)>0?('<span class="req-dot">'+pendingRequestCount(c)+'</span>'):'')+'</button>' +
     '<button class="pin-btn" data-act="toggle-theme">'+(state.theme==="dark"?"☀️ 亮色":"🌙 暗色")+'</button>' +
     '<div class="spacer"></div>' +
+    (eqBadge ? '<div class="stat" title="佩戴徽章 '+escapeHtml(eqBadge.title)+'：完成任务阳光 ×'+BADGE_MULTIPLIER+'"><div class="v">'+eqBadge.icon+'</div><div class="k">佩戴 ×'+BADGE_MULTIPLIER+'</div></div>' : '') +
     '<div class="stat"><div class="v">🔥 '+c.streakDays+'</div><div class="k">连续打卡</div></div>' +
     '<div class="stat"><div class="v">☀️ '+c.sunshine+'</div><div class="k">阳光值</div></div>' +
     '<div class="stat"><div class="v">'+levelOf(c.sunshine)+'</div><div class="k">当前等级</div></div>';
@@ -2340,6 +2357,7 @@ function renderNav(){
     '<button data-act="select" data-subj="'+escapeHtml(s.id)+'" class="'+(s.id===currentSubject?"active":"")+'">' +
     '<span class="dot" style="background:'+safeColor(s.color)+'"></span>'+escapeHtml(s.name)+'</button>'
   ).join("") +
+  '<button class="green" data-act="open-badge-wall" style="margin-top:4px;background:#b8860b;color:#fff">🏅 我的徽章'+(badgeMultiplier(c)>1?' ×'+BADGE_MULTIPLIER:'')+'</button>' +
   '<button class="green" data-act="checkin" style="margin-top:4px">✅ 打卡+20</button>';
 }
 function renderContent(){
@@ -2354,6 +2372,9 @@ function renderContent(){
   const s = c.subjects.find(x=>x.id===currentSubject) || c.subjects[0];
   const pct = computeProgress(s.id);
   const subjEmoji = state.childMode ? ('<span style="font-size:26px;margin-right:6px">'+subjectEmoji(s.id)+'</span>') : "";
+  // FR-31 佩戴加成可解释化：任务行直接展示实得分（基础 5 分 × 倍率向下取整），让孩子明白数字为何变大
+  const sunMult = badgeMultiplier(c);
+  const sunLabel = (sunMult > 1) ? ('+'+Math.floor(5*sunMult)+'☀️ <span class="sun-mult" title="佩戴金徽章加成 ×'+sunMult+'">×'+sunMult+' 徽章加成</span>') : '+5☀️';
 
   let unitsHtml;
   if(state.childMode){
@@ -2364,7 +2385,7 @@ function renderContent(){
         '<input type="checkbox" class="tile-cb" data-act="toggle" data-task="'+escapeHtml(t.id)+'" '+(t.done?"checked":"")+' />' +
         '<span class="tile-emoji">'+subjectEmoji(s.id)+'</span>' +
         '<span class="tile-label">'+escapeHtml(t.title)+'</span>' +
-        '<span class="tile-sun">+5☀️</span>' +
+        '<span class="tile-sun">'+sunLabel+'</span>' +
         '</label>'
       ).join("");
       return '<div class="unit"><h3>📘 '+escapeHtml(u.title)+'</h3><div class="tile-grid">'+tiles+'</div></div>';
@@ -2377,7 +2398,7 @@ function renderContent(){
         return '<label class="task '+(t.done?"done":"")+'">' +
         '<input type="checkbox" data-act="toggle" data-task="'+escapeHtml(t.id)+'" '+(t.done?"checked":"")+' />' +
         '<span class="label">'+escapeHtml(t.title)+'</span>' + tagChip +
-        '<span class="sun">+5☀️</span>' + recurSel + '</label>';
+        '<span class="sun">'+sunLabel+'</span>' + recurSel + '</label>';
       }).join("");
       return '<div class="unit"><h3>📘 '+escapeHtml(u.title)+'</h3>'+tasks+'</div>';
     }).join("");
@@ -2792,23 +2813,26 @@ function computeSunTrend(c, days){
   }
   return out;
 }
-/* FR-31 徽章墙（统计页展示已获得/未获得，未获得置灰显示达成条件；金级徽章可点选佩戴/卸下） */
-function buildBadgeWallHTML(c){
+/* FR-31 徽章墙：孩子端可佩戴（readonly=false，默认），家长统计页只读（SRS 口径：家长不得发放/切换） */
+function buildBadgeWallHTML(c, readonly){
   const earned = (c.badges && c.badges.earned) || {};
   const equipped = (c.badges && c.badges.equipped) || null;
+  const canWear = !readonly;   // 只读视图去掉佩戴交互，佩戴动作归属孩子端
   const tiles = BADGES.map(b=>{
     const got = !!earned[b.id];
     const worn = got && b.gold && equipped === b.id;
-    const tag = !got ? escapeHtml(b.hint) : (b.gold ? (worn ? "佩戴中 · 点击卸下" : "可佩戴 · 点击佩戴") : "已获得");
+    const tag = !got ? escapeHtml(b.hint) : (b.gold ? (worn ? (canWear?"佩戴中 · 点击卸下":"佩戴中") : (canWear?"可佩戴 · 点击佩戴":"可佩戴（去孩子端「我的徽章」佩戴）")) : "已获得");
     return '<div class="badge-tile'+(got?'':' badge-off')+(b.gold?' badge-gold':'')+(worn?' badge-worn':'')+'"' +
-      (got && b.gold ? ' data-act="equip-badge" data-badge-id="'+b.id+'" role="button" tabindex="0"' : '') +
+      (got && b.gold && canWear ? ' data-act="equip-badge" data-badge-id="'+b.id+'" role="button" tabindex="0"' : '') +
       ' title="'+escapeHtml(b.hint)+'">' +
       '<div class="badge-icon">'+b.icon+'</div><div class="badge-name">'+escapeHtml(b.title)+(b.gold?'<span class="badge-goldmark">金</span>':'')+'</div>' +
       '<div class="badge-hint">'+tag+'</div></div>';
   }).join("");
+  const hint = canWear ?
+    '<p class="hint">金色徽章可佩戴 1 枚：佩戴期间完成任务获得的阳光 ×'+BADGE_MULTIPLIER+'（向下取整），打卡、里程碑、抽奖与兑换不参与；卸下立即恢复 1×。徽章只能靠达成解锁，家长也无法手动发放。</p>' :
+    '<p class="hint">金色徽章可佩戴 1 枚（任务阳光 ×'+BADGE_MULTIPLIER+'）。徽章墙为家长侧只读视图：佩戴与卸下由孩子在首页「我的徽章」处操作，家长无法发放或代为切换。</p>';
   return '<h3 style="margin:16px 0 6px">🏅 成就徽章（'+badgeCount(c)+'/'+BADGES.length+'）</h3>' +
-    '<div class="badge-wall">'+tiles+'</div>' +
-    '<p class="hint">金色徽章可佩戴 1 枚：佩戴期间完成任务获得的阳光 ×'+BADGE_MULTIPLIER+'（向下取整），打卡、里程碑、抽奖与兑换不参与；卸下立即恢复 1×。徽章只能靠达成解锁，家长也无法手动发放。</p>';
+    '<div class="badge-wall">'+tiles+'</div>' + hint;
 }
 /* ---------- FR-35 行为标签：家长统计第三维（只读聚合，不参与阳光计算） ---------- */
 /* 按标签聚合今日可见任务；未打标签归入 TAG_NONE 桶 */
@@ -2871,11 +2895,28 @@ function renderStats(){
   }).join("");
   const trendSec='<h3 style="margin:16px 0 6px">📈 近 7 天阳光增减</h3><div class="trend-chart">'+bars+'</div><p class="hint">柱高按每日净增减比例绘制；绿色=当日净赚，橙色=当日净兑出。</p>';
   const heatSec='<h3 style="margin:16px 0 6px">🗓️ 月历打卡热力图</h3>'+buildHeatmapHTML(c)+'<p class="hint">点击日期格可查看当日完成数；绿色=当日任务全部完成，浅橙=部分完成。</p>';
-  const badgeSec='<h3 style="margin:16px 0 6px">🏅 成就徽章</h3>'+buildBadgeWallHTML(c);
+  const badgeSec='<h3 style="margin:16px 0 6px">🏅 成就徽章</h3>'+buildBadgeWallHTML(c, true);   // 家长侧只读，佩戴在孩子端
   body.innerHTML=ov+subjSec+tagSec+trendSec+heatSec+badgeSec;
 }
 function openStats(){ heatOffset=0; statsTagFilter="all"; const __ph=document.getElementById("parentHub"); if(__ph) __ph.classList.remove("show"); renderStats(); document.getElementById("statsDialog").classList.add("show"); }
 function closeStats(){ const el=document.getElementById("statsDialog"); if(el) el.classList.remove("show"); }
+
+/* FR-31 孩子端「我的徽章」浮层：孩子可查看并佩戴（SRS：孩子端徽章墙视图 + 佩戴，家长中心只读）。
+   佩戴动作完成后由 toggleEquipBadge 调 renderBadgeWall 回显，避免浮层停留在陈旧佩戴态 */
+function renderBadgeWall(){
+  const dlg = document.getElementById("badgeDialog");
+  if(!dlg || !dlg.classList.contains("show")) return;
+  const c = cur(); if(!c) return;
+  document.getElementById("badgeWallBody").innerHTML = buildBadgeWallHTML(c);
+}
+function openBadgeWall(){
+  const c = cur(); if(!c) return;
+  const dlg = document.getElementById("badgeDialog");
+  if(!dlg) return;
+  document.getElementById("badgeWallBody").innerHTML = buildBadgeWallHTML(c);
+  dlg.classList.add("show");
+}
+function closeBadgeWall(){ const el=document.getElementById("badgeDialog"); if(el) el.classList.remove("show"); }
 
 /* ---------- FR-28 月历打卡热力图（纯 CSS grid，复用 dayLog 的 done/total 计数） ---------- */
 function buildHeatmapHTML(c){
@@ -3920,6 +3961,8 @@ const DISPATCH = {
   "reject-request": t => rejectRequest(t.getAttribute("data-req")),
   "open-wheel": () => openWheelDialog(),
   "close-wheel": () => document.getElementById("wheelDialog").classList.remove("show"),
+  "open-badge-wall": () => openBadgeWall(),
+  "close-badge-wall": () => closeBadgeWall(),
   "spin-wheel": () => spinWheel(),
   "lottery-cost": () => promptLotteryCost(),
   "open-lottery-editor": () => openLotteryEditor(),
@@ -4140,6 +4183,7 @@ var __APP__ = {
   BADGES: BADGES, BADGE_RULES: BADGE_RULES, BADGE_MULTIPLIER: BADGE_MULTIPLIER,
   badgeMultiplier: badgeMultiplier, evaluateBadges: evaluateBadges, badgeCount: badgeCount, buildBadgeWallHTML: buildBadgeWallHTML,
   normalizeBadgeFields: normalizeBadgeFields, findBadge: findBadge, toggleEquipBadge: toggleEquipBadge,
+  openBadgeWall: openBadgeWall, closeBadgeWall: closeBadgeWall, renderBadgeWall: renderBadgeWall,
   CHIMES: CHIMES, CONFETTI: CONFETTI, playChime: playChime,
   setSoundEnabled: setSoundEnabled, setSoundVolume: setSoundVolume, renderParentHub: renderParentHub,
   REQ_STATUS: REQ_STATUS, normalizeRequests: normalizeRequests, pendingRequestCount: pendingRequestCount,
