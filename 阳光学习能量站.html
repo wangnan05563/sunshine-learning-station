@@ -12,57 +12,89 @@
     --green:#3aa76d; --green-d:#2e8b57; --green-l:#e8f7ee;
     --sun:#ffb300; --sun-ink:#996b00; --ink:#234d36; --muted:#5f7a6a; --card:#ffffff;
     --line:#d6ecdd; --shadow:0 4px 14px rgba(46,139,87,.12);
+    /* T01680：品牌绿底上的深墨字色。顶栏/实心按钮字色统一用它（白字对比仅 2.98~3.03 不达 AA），
+       各主题按色相同色相取近黑，on --green 实测 4.62~5.55、on 玻璃卡 5.96+ */
+    --on-brand:#072a18;
   }
-  /* ---------- FR-20 亮/暗主题 ---------- */
-  [data-theme="dark"]{
+  /* ---------- FR-20 明暗维度（data-mode）：暗色基础色板。主题包（data-theme）未覆盖的属性
+     由此层提供，未声明的组件自动落回暗色默认——这是 theme × mode 正交的关键 ---------- */
+  [data-mode="dark"]{
     --green:#3aa76d; --green-d:#23704a; --green-l:#1c3327;
     --sun:#ffb300; --sun-ink:#ffb300; --ink:#e7f3ec; --muted:#9cc2ad; --card:#16241c;
     --line:#2c4636; --shadow:0 4px 14px rgba(0,0,0,.45);
+    --on-brand:#072a18;
   }
-  [data-theme="dark"] body{
+  [data-mode="dark"] body{
     background:linear-gradient(160deg,#0d1a13 0%,#112019 100%);
     color:var(--ink);
   }
-  [data-theme="dark"] .unit,
-  [data-theme="dark"] .ed-subj,
-  [data-theme="dark"] .reward{ background:#13201a; }
-  [data-theme="dark"] .sheet{ background:#16241c; }
-  [data-theme="dark"] .bar{ background:#22372b; }
-  [data-theme="dark"] .rec:hover{ background:#21372b; }
-  [data-theme="dark"] .task:hover{ background:#1b2b22; }
-  [data-theme="dark"] .toast{ background:#0b160f; color:#e7f3ec; }
-  [data-theme="dark"] .nav button{ color:var(--ink); }
-  [data-theme="dark"] .grade-select option,
-  [data-theme="dark"] .reward select option,
-  [data-theme="dark"] .ed-row select option{ color:var(--ink); }
-  [data-theme="dark"] .ed-name,
-  [data-theme="dark"] .ed-num{ background:#1f3228; color:var(--ink); }
-  [data-theme="dark"] .sheet input[type=password]{ background:#1f3228; color:#e7f3ec; }
-  /* ---------- FR-26 主题包（海洋/森林/太空，纯 CSS 变量层，兑换后生效） ---------- */
+  /* 组件级暗色覆盖一律走 token（T01681）：原硬编码绿系色值会让 ocean/forest/space 的暗色
+     卡片泛绿突兀，改用 --card/--green-l 后自动跟随主题色相 */
+  [data-mode="dark"] .unit,
+  [data-mode="dark"] .ed-subj,
+  [data-mode="dark"] .reward{ background:var(--card); }
+  [data-mode="dark"] .sheet{ background:var(--card); }
+  [data-mode="dark"] .bar{ background:var(--green-l); }
+  [data-mode="dark"] .rec:hover{ background:var(--green-l); }
+  [data-mode="dark"] .task:hover{ background:var(--green-l); }
+  [data-mode="dark"] .toast{ background:var(--green-l); color:var(--ink); }
+  [data-mode="dark"] .nav button{ color:var(--ink); }
+  [data-mode="dark"] .grade-select option,
+  [data-mode="dark"] .reward select option,
+  [data-mode="dark"] .ed-row select option{ color:var(--ink); }
+  [data-mode="dark"] .ed-name,
+  [data-mode="dark"] .ed-num{ background:var(--green-l); color:var(--ink); }
+  [data-mode="dark"] .sheet input[type=password]{ background:var(--green-l); color:var(--ink); }
+  [data-mode="dark"] .task-tile{ background:var(--card); border-color:var(--line); }
+  [data-mode="dark"] .task-tile.done{ background:var(--green-l); border-color:var(--green-d); }
+  /* ---------- FR-26 主题包（data-theme）：色调层，与 data-mode 正交（T01681 做真正交，
+     PRD「太空 × 暗」等 8 组合全部可达） ---------- */
   [data-theme="ocean"]{
     --green:#2b8fbf; --green-d:#1c6a93; --green-l:#e3f3fb;
     --sun:#ffb300; --sun-ink:#996b00; --ink:#123a4d; --muted:#4f798e; --card:#ffffff;
     --line:#cfe8f4; --shadow:0 4px 14px rgba(28,106,147,.14);
+    --on-brand:#04202e;
   }
   [data-theme="ocean"] body{ background:linear-gradient(160deg,#e6f6fd 0%,#d3ecf7 100%); }
+  [data-theme="ocean"][data-mode="dark"]{
+    --green:#3fa5d6; --green-d:#2b7fa8; --green-l:#132836;
+    --sun:#ffb300; --sun-ink:#ffd166; --ink:#e3f4fb; --muted:#8fbdd4; --card:#132330;
+    --line:#25455c; --shadow:0 4px 14px rgba(0,0,0,.45);
+  }
+  [data-theme="ocean"][data-mode="dark"] body{ background:linear-gradient(160deg,#0a1822 0%,#0e2130 100%); }
   [data-theme="forest"]{
     --green:#4e9a51; --green-d:#37703a; --green-l:#eaf5e9;
     --sun:#e8a33d; --sun-ink:#a26813; --ink:#2c4423; --muted:#677a5f; --card:#fffdf6;
     --line:#dcedd8; --shadow:0 4px 14px rgba(55,112,58,.14);
+    --on-brand:#071f0a;
   }
   [data-theme="forest"] body{ background:linear-gradient(160deg,#f2f8e9 0%,#e5f1dd 100%); }
+  [data-theme="forest"][data-mode="dark"]{
+    --green:#63b566; --green-d:#3f8a44; --green-l:#1d3320;
+    --sun:#e8a33d; --sun-ink:#ffd166; --ink:#e8f3e6; --muted:#a3c29b; --card:#1a2b1a;
+    --line:#33502f; --shadow:0 4px 14px rgba(0,0,0,.45);
+  }
+  [data-theme="forest"][data-mode="dark"] body{ background:linear-gradient(160deg,#0d1a0e 0%,#122612 100%); }
   [data-theme="space"]{
-    --green:#7c6ce0; --green-d:#5140a8; --green-l:#efeaff;
+    /* --green 由 #7c6ce0 提亮到 #8478e6：深紫底上深墨字无法达 4.5，微调亮度后 on-brand 达 5.55 */
+    --green:#8478e6; --green-d:#5140a8; --green-l:#efeaff;
     --sun:#ffd166; --sun-ink:#996b00; --ink:#241b47; --muted:#786da1; --card:#ffffff;
     --line:#e0d8ff; --shadow:0 4px 14px rgba(81,64,168,.16);
+    --on-brand:#070616;
   }
   [data-theme="space"] body{ background:linear-gradient(160deg,#efeaff 0%,#e0e6ff 100%); }
+  [data-theme="space"][data-mode="dark"]{
+    --green:#9a8cf0; --green-d:#6e5fc7; --green-l:#241f45;
+    --sun:#ffd166; --sun-ink:#ffd166; --ink:#eae6fb; --muted:#a79dd6; --card:#1e1a3a;
+    --line:#3a3368; --shadow:0 4px 14px rgba(0,0,0,.45);
+  }
+  [data-theme="space"][data-mode="dark"] body{ background:linear-gradient(160deg,#131028 0%,#1a1638 100%); }
   .theme-row{ display:flex; align-items:center; gap:10px; padding:10px 12px; background:var(--card); border:1px solid var(--line); border-radius:12px; margin:8px 0; }
   .theme-swatch{ width:34px; height:34px; border-radius:10px; flex:0 0 34px; border:1px solid rgba(0,0,0,.08); }
   .theme-info{ flex:1; }
   .theme-name{ font-weight:700; }
   .theme-cost{ font-size:12px; color:var(--muted); }
-  .theme-row button{ border:none; border-radius:10px; padding:7px 12px; font-weight:700; cursor:pointer; background:var(--green); color:#fff; }
+  .theme-row button{ border:none; border-radius:10px; padding:7px 12px; font-weight:700; cursor:pointer; background:var(--green); color:var(--on-brand); }
   .theme-row button:disabled{ background:#cfd8d2; cursor:default; }
   .theme-cur{ font-size:12px; color:var(--green-d); font-weight:700; }
   *{box-sizing:border-box;}
@@ -74,8 +106,10 @@
   #app{max-width:1100px; margin:0 auto; padding:14px;}
   .topbar{
     display:flex; align-items:center; gap:14px; flex-wrap:wrap;
-    background:linear-gradient(120deg,var(--green),var(--green-d));
-    color:#fff; border-radius:18px; padding:16px 20px; box-shadow:var(--shadow);
+    /* T01680：由 var(--green)→var(--green-d) 渐变改纯色——渐变暗端（--green-d）上深墨字无法达 4.5，
+       两端色差本就细微，纯色让全顶栏字色对比统一以 --green 为基准 */
+    background:var(--green);
+    color:var(--on-brand); border-radius:18px; padding:16px 20px; box-shadow:var(--shadow);
   }
   .topbar .logo{font-size:26px; font-weight:800; letter-spacing:1px;}
   .topbar .spacer{flex:1;}
@@ -83,20 +117,20 @@
     background:rgba(255,255,255,.18); border-radius:14px; padding:8px 14px;
     text-align:center; min-width:84px;
   }
-  .stat .v{font-size:22px; font-weight:800; line-height:1;}
-  .stat .k{font-size:12px; opacity:.9; margin-top:4px;}
+  .stat .v{font-size:22px; font-weight:800; line-height:1; color:var(--on-brand);}
+  .stat .k{font-size:12px; color:var(--on-brand); margin-top:4px;}
   .name-edit{
-    border:none; background:rgba(255,255,255,.22); color:#fff; font-weight:700;
+    border:none; background:rgba(255,255,255,.22); color:var(--on-brand); font-weight:700;
     font-size:18px; border-radius:10px; padding:6px 10px; width:120px; text-align:center;
   }
-  .name-edit::placeholder{color:rgba(255,255,255,.7);}
+  .name-edit::placeholder{color:var(--on-brand); opacity:.62;}
   .grade-select{
-    border:none; background:rgba(255,255,255,.22); color:#fff; font-weight:700;
+    border:none; background:rgba(255,255,255,.22); color:var(--on-brand); font-weight:700;
     font-size:15px; border-radius:10px; padding:6px 8px; cursor:pointer;
   }
   .grade-select option{color:var(--ink);}
   .pin-btn{
-    border:none; background:rgba(255,255,255,.22); color:#fff; font-weight:700;
+    border:none; background:rgba(255,255,255,.22); color:var(--on-brand); font-weight:700;
     font-size:14px; border-radius:10px; padding:6px 10px; cursor:pointer;
   }
   .pin-btn:active{transform:scale(.96);}
@@ -111,7 +145,7 @@
     display:flex; align-items:center; gap:8px;
   }
   .nav button .dot{width:10px; height:10px; border-radius:50%;}
-  .nav button.active{background:var(--green); color:#fff;}
+  .nav button.active{background:var(--green); color:var(--on-brand);}
   .nav button:active{transform:scale(.97);}
   .content{flex:1; min-width:0;}
   .panel{background:var(--card); border-radius:16px; padding:16px; box-shadow:var(--shadow); margin-bottom:14px;}
@@ -144,7 +178,7 @@
     border:none; cursor:pointer; border-radius:12px; padding:12px 16px; font-weight:800;
     font-size:15px; background:var(--sun); color:#5a3d00; box-shadow:var(--shadow);
   }
-  .btn.green{background:var(--green); color:#fff;}
+  .btn.green{background:var(--green); color:var(--on-brand);}
   .btn:active{transform:scale(.97);}
   .toolbar{display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
   .fab{
@@ -288,8 +322,7 @@
   .task-tile .tile-sun{ font-size:13px; color:var(--sun-ink); font-weight:700; }
   .task-tile.done{ background:var(--green-l); border-color:var(--green); }
   .task-tile.done .tile-label{ text-decoration:line-through; color:var(--muted); }
-  [data-theme="dark"] .task-tile{ background:#13201a; border-color:#2c4636; }
-  [data-theme="dark"] .task-tile.done{ background:#1c3327; border-color:#23704a; }
+  /* 暗色磁贴覆盖已在 data-mode token 层统一（跟随主题色相），此处不再硬编码绿系 */
   /* ---------- O10 撤销 toast 动作按钮 ---------- */
   .toast-msg{ white-space:nowrap; }
   .toast-action{
@@ -514,7 +547,7 @@
     <button class="btn" data-act="open-weekly" style="width:100%;margin-top:8px;background:#6c5ce7;color:#fff">📅 每周周报</button>
     <button class="btn" data-act="open-race" style="width:100%;margin-top:8px;background:#e67e22;color:#fff">🏁 专注挑战赛</button>
     <button class="btn" data-act="open-sync" style="width:100%;margin-top:8px;background:#3aa76d;color:#fff">☁️ 云同步设置（WebDAV）</button>
-    <button class="btn" data-act="toggle-theme" style="width:100%;margin-top:8px">🌗 切换亮 / 暗主题</button>
+    <button class="btn" data-act="toggle-theme" style="width:100%;margin-top:8px">🌗 切换亮色 / 暗色模式</button>
     <div class="req-box">
       <div class="req-title">📥 兑换申请 <span id="reqCount" class="req-badge">0</span></div>
       <p class="hint">孩子点「申请兑换」后先进这里，不占用阳光值；批准时才扣分发货，阳光不足会批准失败并留回执。</p>
@@ -1170,14 +1203,14 @@ function normalizeRequests(c){
     seenPending[r.rewardId] = true; return true;
   });
 }
-/* FR-26 主题商店目录：light/dark 免费内置，其余为可兑换主题包（纯 CSS 变量层） */
+/* FR-26 主题商店目录：light 免费内置，其余为可兑换主题包（纯 CSS 变量层）。
+   dark 不在目录里——T01681 起明暗是独立开关（data-mode），不再是主题包 */
 function defaultThemes(){
   return [
     { id:"light", title:"默认阳光绿", cost:0,  swatch:"linear-gradient(135deg,#3aa76d,#e8f7ee)" },
-    { id:"dark",  title:"夜晚星原",   cost:0,  swatch:"linear-gradient(135deg,#16241c,#3aa76d)" },
     { id:"ocean", title:"海洋世界",   cost:150, swatch:"linear-gradient(135deg,#2b8fbf,#e3f3fb)" },
     { id:"forest",title:"森林秘境",   cost:180, swatch:"linear-gradient(135deg,#4e9a51,#f2f8e9)" },
-    { id:"space", title:"太空漫游",   cost:220, swatch:"linear-gradient(135deg,#7c6ce0,#efeaff)" }
+    { id:"space", title:"太空漫游",   cost:220, swatch:"linear-gradient(135deg,#8478e6,#efeaff)" }
   ];
 }
 function buildChild(name, grade, pin){
@@ -1201,6 +1234,7 @@ function buildDefaultState(){
   return {
     meta:{ version:1, schema:"sunshine_station" },
     theme:"light",
+    mode:"light",   /* T01681：明暗独立维度，与 theme 正交（dark 不再是主题） */
     childMode:false,
     sound:{ enabled:true, volume:0.6 },
     rewards: defaultRewards(),
@@ -1377,7 +1411,10 @@ function ensureIds(){
   if(typeof state.sound.enabled !== "boolean") state.sound.enabled = true;
   if(typeof state.sound.volume !== "number" || isNaN(state.sound.volume)) state.sound.volume = 0.6;
   state.sound.volume = Math.max(0, Math.min(1, state.sound.volume));
-  // FR-26 主题目录与拥有态归一化（light/dark 为内置必备项，缺失即补回，避免主题卡死）
+  // FR-26 主题目录与拥有态归一化（light 为内置必备项，缺失即补回，避免主题卡死）
+  // T01681 迁移：旧档案 theme:"dark" 拆为 theme:"light" + mode:"dark"（明暗不再是主题包）
+  if(state.theme === "dark"){ state.theme = "light"; state.mode = "dark"; }
+  if(state.mode !== "dark") state.mode = "light";
   if(!Array.isArray(state.themes) || !state.themes.length) state.themes = defaultThemes();
   else {
     const knownIds = {};
@@ -1391,15 +1428,19 @@ function ensureIds(){
       knownIds[t.id] = true;
     });
     defaultThemes().forEach(dt=>{ if(!knownIds[dt.id]) state.themes.push(dt); });
+    // dark 条目已转为独立明暗开关，从旧档案目录中移除，避免商店渲染出不可组合的假主题
+    state.themes = state.themes.filter(t=>t.id !== "dark");
   }
-  if(!Array.isArray(state.ownedThemes)) state.ownedThemes = ["light","dark"];
+  if(!Array.isArray(state.ownedThemes)) state.ownedThemes = ["light"];
   else {
     const seen = {};
     state.ownedThemes = state.ownedThemes.filter(id=>{
       if(typeof id !== "string" || !id || seen[id]) return false;
       seen[id] = true; return true;
     });
-    ["light","dark"].forEach(id=>{ if(!seen[id]) state.ownedThemes.push(id); });
+    // dark 拥有态一并清除：明暗开关免费对所有人开放，不需要也不应出现在主题库存里
+    state.ownedThemes = state.ownedThemes.filter(id=>id !== "dark");
+    if(state.ownedThemes.indexOf("light") < 0) state.ownedThemes.push("light");
   }
   const themeOk = state.themes.some(t=>t.id===state.theme) && state.ownedThemes.indexOf(state.theme) >= 0;
   if(!themeOk) state.theme = (state.ownedThemes.indexOf("light") >= 0) ? "light" : state.ownedThemes[0];
@@ -2253,12 +2294,17 @@ function renderMyRequests(){
 function applyTheme(){
   if (typeof document === "undefined" || !document.documentElement || !document.documentElement.setAttribute) return;
   document.documentElement.setAttribute("data-theme", (state && state.theme) || "light");
+  /* T01681：data-mode 独立于 data-theme——主题包（色调）与明暗（基础色板）正交后，
+     "太空 × 暗"这类组合由两个属性共同表达，缺一即回到单维互斥老问题 */
+  document.documentElement.setAttribute("data-mode", (state && state.mode) || "light");
 }
 function toggleTheme(){
-  state.theme = (state.theme === "dark") ? "light" : "dark";
+  /* T01681：toggle 只切明暗维度（state.mode），不再动 state.theme——
+     用户选了「海洋世界」再切夜间，期望的是海洋的暗色，而不是主题被顶掉 */
+  state.mode = (state.mode === "dark") ? "light" : "dark";
   applyTheme(); save();
   renderTopbar();
-  toast(state.theme === "dark" ? "已切换为暗色 🌙" : "已切换为亮色 ☀️");
+  toast(state.mode === "dark" ? "已切换为暗色 🌙" : "已切换为亮色 ☀️");
 }
 
 /* FR-26 主题商店：兑换即永久拥有（主题是全栈视觉变量层，故全家共享一份），拥有后可随时切换 */
@@ -2340,7 +2386,7 @@ function renderTopbar(){
     '<input class="name-edit" id="nameInput" value="'+escapeHtml(c.name)+'" placeholder="孩子名字" />' +
     '<select class="grade-select" id="gradeSelect" title="选择年级">'+gradeOpts+'</select>' +
     '<button class="pin-btn" data-act="open-parent-hub">👨‍👩‍👧 家长中心'+(pendingRequestCount(c)>0?('<span class="req-dot">'+pendingRequestCount(c)+'</span>'):'')+'</button>' +
-    '<button class="pin-btn" data-act="toggle-theme">'+(state.theme==="dark"?"☀️ 亮色":"🌙 暗色")+'</button>' +
+    '<button class="pin-btn" data-act="toggle-theme">'+(state.mode==="dark"?"☀️ 亮色":"🌙 暗色")+'</button>' +
     '<div class="spacer"></div>' +
     (eqBadge ? '<div class="stat" title="佩戴徽章 '+escapeHtml(eqBadge.title)+'：完成任务阳光 ×'+BADGE_MULTIPLIER+'"><div class="v">'+eqBadge.icon+'</div><div class="k">佩戴 ×'+BADGE_MULTIPLIER+'</div></div>' : '') +
     '<div class="stat"><div class="v">🔥 '+c.streakDays+'</div><div class="k">连续打卡</div></div>' +

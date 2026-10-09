@@ -511,7 +511,7 @@ function floatProbe(){
   await A(() => window.__STUDY_APP__.addSunshine(1200, "test_seed", "回归测试充值"));
   await page.waitForTimeout(150);
   const themeRows = await A(() => document.querySelectorAll("#theme-list .theme-row").length);
-  check("商店主题区渲染 5 套（2 免费 + 3 兑换）", themeRows === 5, "rows=" + themeRows);
+  check("商店主题区渲染 4 套（1 免费 + 3 兑换）", themeRows === 4, "rows=" + themeRows);
   await page.locator('[data-act="close-store"]').click();
   await page.waitForTimeout(250);
   const themeReport = {};
@@ -570,26 +570,42 @@ function floatProbe(){
       const large = m.fs >= 24 || (m.fs >= 18.66 && bold);
       return { sel: m.sel, ratio: Number(ratio.toFixed(2)), need: large ? 3 : 4.5, fs: m.fs, fg: m.fg, bg: pxMap[i].join(",") };
     });
-    // 孩子端正文/激励数字/提示 = 发布门禁（硬失败）；品牌绿底白字小控件 = 已知未通过项（soft，另派设计单）
-    const BRAND_CHIP = [".stat .v", ".stat .k", ".nav button.active", ".btn.green"];
-    const gate = res.filter(r => BRAND_CHIP.indexOf(r.sel) < 0);
-    const chip = res.filter(r => BRAND_CHIP.indexOf(r.sel) >= 0);
-    const bad = gate.filter(r => r.ratio < r.need);
-    check("主题「" + label + "」正文/激励数字/提示达 WCAG AA 对比度", bad.length === 0, JSON.stringify(bad));
-    const chipBad = chip.filter(r => r.ratio < r.need);
-    soft("主题「" + label + "」品牌绿底白字控件达 AA", chipBad.length === 0, "未达标：" + JSON.stringify(chipBad.map(r => ({ sel: r.sel, ratio: r.ratio, need: r.need }))));
+    // T01680：品牌绿底控件（.stat .v/.stat .k/.nav button.active/.btn.green）改用 --on-brand 深墨字色，
+    // 与正文合并进同一条硬门禁——不再存在「已知未通过项」的 soft 豁免
+    const bad = res.filter(r => r.ratio < r.need);
+    check("主题「" + label + "」正文/数字/品牌控件全部达 WCAG AA 对比度", bad.length === 0, JSON.stringify(bad));
     const muted = res.filter(r => /\.k$|hint|\.sun/.test(r.sel));
     soft("主题「" + label + "」次要文本（计数/提示）不低于 3.0", muted.every(r => r.ratio >= 3), JSON.stringify(muted.map(r => r.sel + "=" + r.ratio)));
     note("「" + label + "」对比度实测：" + res.map(r => r.sel.replace(/^\./, "") + " " + r.ratio + "/" + r.need).join("  "));
     return res;
   }
 
-  themeReport.light = await contrastReport("默认清晨 light（基线）");   // 浮层会压暗背景，测量必须在主屏无遮罩时进行
-  await shot("04_theme_light.png");
-  await page.locator('[data-act="open-store"]').click();
-  await page.waitForTimeout(200);
+  // T01680+T01681：主题 × 明暗正交后共 4×2=8 组合，逐组合跑对比度门禁。
+  // 浮层会压暗背景，测量必须在主屏无遮罩时进行；模式切换唯一入口是顶栏按钮（写 data-mode）
+  const topbarToggle = page.locator('.topbar .pin-btn[data-act="toggle-theme"]');
+  const stateNow = () => A(() => ({ theme: window.__STUDY_APP__.state.theme, mode: window.__STUDY_APP__.state.mode, dt: document.documentElement.getAttribute("data-theme"), dm: document.documentElement.getAttribute("data-mode") }));
+  async function toMode(m){
+    if ((await stateNow()).mode !== m){ await topbarToggle.click(); await page.waitForTimeout(250); }
+    const s = await stateNow();
+    check("顶栏切换明暗模式 → " + m + "（data-mode 同步）", s.mode === m && s.dm === m, JSON.stringify(s));
+  }
+  async function toTheme(th){
+    await page.locator('[data-act="open-store"]').click();
+    await page.waitForTimeout(200);
+    await page.locator(`.theme-row [data-act="use-theme"][data-theme-id="${th}"]`).click();
+    await page.waitForTimeout(250);
+    await page.locator('[data-act="close-store"]').click();
+    await page.waitForTimeout(250);
+    const s = await stateNow();
+    check("切到主题 " + th + "（data-theme 同步、明暗态不被顶掉）", s.theme === th && s.dt === th, JSON.stringify(s));
+  }
+
+  themeReport["light|light"] = await contrastReport("清晨 light × 亮色（基线）");
+  await shot("04_theme_light_light.png");
 
   for (const th of ["ocean", "forest", "space"]){
+    await page.locator('[data-act="open-store"]').click();
+    await page.waitForTimeout(200);
     const btn = page.locator(`.theme-row [data-act="redeem-theme"][data-theme-id="${th}"]`);
     check(`「${th}」兑换按钮可点（阳光充足）`, await btn.count() === 1 && !(await btn.first().isDisabled()));
     await btn.first().click();
@@ -597,33 +613,29 @@ function floatProbe(){
     await page.locator("#pinInput").fill(PIN);
     await page.locator('[data-act="submit-pin"]').click();
     await page.waitForTimeout(1400);
-    const st = await A(() => ({ theme: window.__STUDY_APP__.state.theme, owned: window.__STUDY_APP__.state.ownedThemes.slice(), attr: document.documentElement.getAttribute("data-theme") }));
-    check(`「${th}」兑换成功并立即启用`, st.theme === th && st.owned.indexOf(th) >= 0 && st.attr === th, JSON.stringify(st));
+    const st = await A(() => ({ s: window.__STUDY_APP__.state.theme, m: window.__STUDY_APP__.state.mode, owned: window.__STUDY_APP__.state.ownedThemes.slice(), dt: document.documentElement.getAttribute("data-theme") }));
+    check(`「${th}」兑换成功并立即启用（亮色落位）`, st.s === th && st.owned.indexOf(th) >= 0 && st.dt === th && st.m === "light", JSON.stringify(st));
     await page.locator('[data-act="close-store"]').click();
     await page.waitForTimeout(250);
-    themeReport[th] = await contrastReport(th);
-    await shot(`05_theme_${th}.png`);
-    await page.locator('[data-act="open-store"]').click();
-    await page.waitForTimeout(200);
+    themeReport[th + "|light"] = await contrastReport(th + " light");
+    await shot(`05_theme_${th}_light.png`);
     // 已拥有主题来回切换不重复扣减
     const s_before = await sunshine();
-    await page.locator(`.theme-row [data-act="use-theme"][data-theme-id="light"]`).click();
-    await page.waitForTimeout(200);
-    await page.locator(`.theme-row [data-act="use-theme"][data-theme-id="${th}"]`).click();
-    await page.waitForTimeout(200);
+    await toTheme("light");
+    await toTheme(th);
     check("已拥有主题来回切换不重复扣阳光", (await sunshine()) === s_before, s_before + " vs " + await sunshine());
   }
-  await page.locator('.theme-row [data-act="use-theme"][data-theme-id="dark"]').click();
-  await page.waitForTimeout(250);
-  await page.locator('[data-act="close-store"]').click();
-  await page.waitForTimeout(250);
-  themeReport.dark = await contrastReport("夜晚星原 dark");
-  await shot("06_theme_dark.png");
-  await page.locator('[data-act="open-store"]').click();
-  await page.waitForTimeout(200);
-  check("免费主题 light/dark 始终可用（ownedThemes 含二者）", await A(() => window.__STUDY_APP__.state.ownedThemes.indexOf("light") >= 0 && window.__STUDY_APP__.state.ownedThemes.indexOf("dark") >= 0));
-  await page.locator('.theme-row [data-act="use-theme"][data-theme-id="light"]').click();
-  await page.locator('[data-act="close-store"]').click();
+
+  // 8 组合矩阵的 dark 侧：正交组合「主题 × 暗」逐套测量，而非旧「dark 主题」单点
+  for (const th of ["light", "ocean", "forest", "space"]){
+    await toTheme(th);
+    await toMode("dark");
+    themeReport[th + "|dark"] = await contrastReport(th + " dark");
+    await shot(`06_theme_${th}_dark.png`);
+    await toMode("light");
+  }
+  check("免费主题 light 始终可用（ownedThemes 含 light）", await A(() => window.__STUDY_APP__.state.ownedThemes.indexOf("light") >= 0));
+  await toTheme("light");
 
   section("P1 FR-30 存钱罐（转入/取出/计息/提示语）");
   await page.locator('[data-act="open-store"]').click();
