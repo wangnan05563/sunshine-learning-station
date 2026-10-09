@@ -482,7 +482,8 @@
     <button class="btn green" data-act="open-pinset" style="width:100%;margin-top:6px">🔐 审批码设置</button>
     <button class="btn" data-act="open-editor" style="width:100%;margin-top:8px;background:#8a6dd6;color:#fff">🛠️ 内容管理 · 学科/任务/奖励/等级</button>
     <button class="btn" data-act="open-stats" style="width:100%;margin-top:8px;background:#f2994a;color:#fff">📊 学习统计</button>
-    <button class="btn" data-act="piggy-rate" style="width:100%;margin-top:8px;background:#ffb84d;color:#5a3d00">🐷 存钱罐周利率设置</button>
+    <button class="btn" data-act="piggy-rate" style="width:100%;margin-top:8px;background:#ffb84d;color:#5a3d00">🐷 存钱罐周利率设置（0~10%）</button>
+    <button class="btn" data-act="piggy-penalty" style="width:100%;margin-top:8px;background:#ffb84d;color:#5a3d00">🐷 存钱罐提前取出惩罚</button>
     <button class="btn" data-act="open-weekly" style="width:100%;margin-top:8px;background:#6c5ce7;color:#fff">📅 每周周报</button>
     <button class="btn" data-act="open-race" style="width:100%;margin-top:8px;background:#e67e22;color:#fff">🏁 专注挑战赛</button>
     <button class="btn" data-act="open-sync" style="width:100%;margin-top:8px;background:#3aa76d;color:#fff">☁️ 云同步设置（WebDAV）</button>
@@ -1146,7 +1147,7 @@ function buildChild(name, grade, pin){
     awardedMilestones:[], dayLog:{}, perfectStreak:0, lastPerfectDate:null, dailyAward:{date:null,tiers:[]},
     subjects: defaultSubjects(grade),
     curriculumByGrade:{}, ledger:[],
-    piggyBank:{ balance:0, weeklyRate:0.05, lastInterestDate:null },
+    piggyBank:{ weeklyRate:0.02, earlyPenalty:0, deposits:[] },
     badges:{ earned:{}, equipped:null },
     requests:[],
     badgeStats:{ totalEarned:0, taskDone:0, redeemCount:0, piggyInterest:false, lotteryWin:false }
@@ -1397,12 +1398,22 @@ function ensureIds(){
     if(!c.curriculumByGrade || typeof c.curriculumByGrade !== "object") c.curriculumByGrade = {};
     if(!c.ledger || !Array.isArray(c.ledger)) c.ledger = [];
     if(!c.raceBest || typeof c.raceBest !== "object") c.raceBest = {};
-    // FR-30 存钱罐兼容
-    if(!c.piggyBank || typeof c.piggyBank !== "object") c.piggyBank = { balance:0, weeklyRate:0.05, lastInterestDate:null };
+    // FR-30 存钱罐兼容：旧单余额模型迁移为分笔（balance→一笔存款，起息日沿用上次结算日）
+    if(!c.piggyBank || typeof c.piggyBank !== "object") c.piggyBank = { weeklyRate:0.02, earlyPenalty:0, deposits:[] };
     else {
-      if(typeof c.piggyBank.balance !== "number" || isNaN(c.piggyBank.balance)) c.piggyBank.balance = 0;
-      if(typeof c.piggyBank.weeklyRate !== "number" || isNaN(c.piggyBank.weeklyRate) || c.piggyBank.weeklyRate < 0) c.piggyBank.weeklyRate = 0.05;
-      if(c.piggyBank.lastInterestDate !== null && typeof c.piggyBank.lastInterestDate !== "string") c.piggyBank.lastInterestDate = null;
+      if(typeof c.piggyBank.weeklyRate !== "number" || isNaN(c.piggyBank.weeklyRate) || c.piggyBank.weeklyRate < 0) c.piggyBank.weeklyRate = 0.02;
+      if(c.piggyBank.weeklyRate > 0.1) c.piggyBank.weeklyRate = 0.1;   // 上限对齐 PRD 0~10%（旧版曾允许到 100%）
+      if(c.piggyBank.earlyPenalty !== 10) c.piggyBank.earlyPenalty = 0; // 仅「原额取出/扣10%」两档，其余值一律回落默认
+      if(!Array.isArray(c.piggyBank.deposits)){
+        const bal = (typeof c.piggyBank.balance === "number" && !isNaN(c.piggyBank.balance)) ? Math.max(0, Math.floor(c.piggyBank.balance)) : 0;
+        const since = (typeof c.piggyBank.lastInterestDate === "string" && c.piggyBank.lastInterestDate) ? c.piggyBank.lastInterestDate : todayStr();
+        c.piggyBank.deposits = bal > 0 ? [{ amount: bal, date: since }] : [];
+      } else {
+        c.piggyBank.deposits = c.piggyBank.deposits
+          .filter(d => d && typeof d.amount === "number" && !isNaN(d.amount) && d.amount > 0 && typeof d.date === "string")
+          .map(d => ({ amount: Math.floor(d.amount), date: d.date }));
+      }
+      delete c.piggyBank.balance; delete c.piggyBank.lastInterestDate;  // 旧字段使命结束，避免新旧两套口径并存
     }
     // FR-31 徽章拥有态与累计赚取统计兼容
     normalizeBadgeFields(c);
@@ -2450,14 +2461,34 @@ function spinWheel(){
 
 /* ---------- FR-30 存钱罐与利息（财商教育：储蓄 vs 即时消费，周利率家长可配） ---------- */
 /* 记账口径：存入/取出是 sunshine 的真实进出（走 addSunshine，账本可对账）；
-   利息计入存钱罐余额而非可花 sunshine，故写 amount=0 的说明行，不污染余额对账。 */
+   利息计入存钱罐余额而非可花 sunshine，故写 amount=0 的说明行，不污染余额对账。
+   分笔计息（PRD 验收「多笔不同存入日互不干扰」）：每笔存入独立起息，满 7 天结算一次，
+   利息作为新分笔从结算日起息（复利入罐）；罐内总额恒为分笔之和，导出分笔即完整状态。 */
+function piggyBalanceOf(pb){
+  return (pb.deposits || []).reduce((s,d)=>s+(d.amount||0), 0);
+}
+/* 距最近一次利息到账的天数（各笔独立 7 天周期取最小）；0% 利率或空罐返回 -1（调用方隐藏文案） */
+function piggyDaysToNextInterest(pb){
+  if(!pb || !(pb.weeklyRate > 0)) return -1;
+  const list = pb.deposits || [];
+  if(!list.length) return -1;
+  const t = new Date(todayStr() + "T00:00:00");
+  let min = Infinity;
+  list.forEach(d=>{
+    const days = Math.floor((t - new Date(d.date + "T00:00:00")) / 86400000);
+    // days 恰为 7 的倍数表示「已到账待结算」（启动结算会消化该状态），取模后须显示 0 而非 7
+    const remain = days > 0 ? (7 - (days % 7)) % 7 : 7;
+    if(remain < min) min = remain;
+  });
+  return min;
+}
 function depositToPiggy(rawAmount){
   const c = cur(); if(!c) return false;
   const amount = Math.floor(Number(rawAmount));
   if(isNaN(amount) || amount <= 0){ toast("请输入有效金额"); return false; }
   if(c.sunshine < amount){ toast("可花的阳光值不足"); return false; }
   addSunshine(-amount, "deposit", "存入存钱罐");
-  c.piggyBank.balance += amount;
+  c.piggyBank.deposits.push({ amount: amount, date: todayStr() });   // 存入即锁定：独立起息，满 7 天才参与结算
   celebrate({ type:"deposit", text:"存进 "+amount+"☀️，储蓄罐鼓起来啦" });
   save(); renderTopbar(); renderStore();
   return true;
@@ -2467,10 +2498,22 @@ function withdrawFromPiggy(rawAmount){
   const c = cur(); if(!c) return false;
   const amount = Math.floor(Number(rawAmount));
   if(isNaN(amount) || amount <= 0){ toast("请输入有效金额"); return false; }
-  if(c.piggyBank.balance < amount){ toast("存钱罐余额不足"); return false; }
-  c.piggyBank.balance -= amount;
-  addSunshine(amount, "withdraw", "从存钱罐取出");
-  celebrate({ type:"withdraw", text:"取出 "+amount+"☀️ 可以花啦" });
+  if(piggyBalanceOf(c.piggyBank) < amount){ toast("存钱罐余额不足"); return false; }
+  /* FIFO 先进先出：先扣最早存入的笔——已满 7 天（跨过至少一个计息周期）的存款不受提前取出惩罚 */
+  const t = new Date(todayStr() + "T00:00:00");
+  let remain = amount, payout = 0, forfeit = 0;
+  (c.piggyBank.deposits || []).forEach(d=>{
+    if(remain <= 0) return;
+    const take = Math.min(d.amount, remain); remain -= take; d.amount -= take;
+    const heldDays = Math.floor((t - new Date(d.date + "T00:00:00")) / 86400000);
+    if(c.piggyBank.earlyPenalty === 10 && heldDays < 7){
+      const got = Math.floor(take * 0.9);       // 提前取出：实收 9 折，差额罚没（PRD「扣 10% 利息惩罚」的落地口径）
+      payout += got; forfeit += take - got;
+    } else payout += take;
+  });
+  c.piggyBank.deposits = (c.piggyBank.deposits || []).filter(d => d.amount > 0);
+  addSunshine(payout, "withdraw", forfeit > 0 ? ("从存钱罐取出（提前取出惩罚 -"+forfeit+"☀️）") : "从存钱罐取出");
+  celebrate({ type:"withdraw", text:"取出 "+payout+"☀️ 可以花啦" });
   save(); renderTopbar(); renderStore();
   return true;
 }
@@ -2478,35 +2521,47 @@ function withdrawFromPiggy(rawAmount){
 function settlePiggyInterest(){
   const c = cur(); if(!c || !c.piggyBank) return 0;
   const today = todayStr();
-  if(c.piggyBank.lastInterestDate === today) return 0;
-  let weeks = 1;
-  if(c.piggyBank.lastInterestDate){
-    const last = new Date(c.piggyBank.lastInterestDate + "T00:00:00");
-    const now = new Date(today + "T00:00:00");
-    weeks = Math.max(0, Math.floor((now - last) / (7*24*60*60*1000)));
-  }
-  let interest = 0;
-  if(weeks > 0 && c.piggyBank.balance > 0){
-    interest = Math.floor(c.piggyBank.balance * c.piggyBank.weeklyRate * weeks);
-    if(interest > 0){
-      c.piggyBank.balance += interest;
-      pushLedger("interest", 0, "存钱罐利息 +"+interest+"☀️（"+weeks+"周）");
-      if(c.badgeStats) c.badgeStats.piggyInterest = true;   // FR-31 储蓄首息
-      celebrate({ type:"interest", text:"存钱罐长出 "+interest+"☀️ 利息" });
+  const t = new Date(today + "T00:00:00");
+  let total = 0;
+  (c.piggyBank.deposits || []).forEach(d=>{
+    const base = new Date(d.date + "T00:00:00");
+    const weeks = Math.floor((t - base) / (7*86400000));
+    if(weeks <= 0) return;
+    if(c.piggyBank.weeklyRate > 0 && d.amount > 0){
+      const interest = Math.floor(d.amount * c.piggyBank.weeklyRate * weeks);
+      if(interest > 0){
+        total += interest;
+        c.piggyBank.deposits.push({ amount: interest, date: today });   // 利息入罐并从今天起息（复利）；forEach 不遍历追加项
+      }
     }
+    d.date = dayKeyLocal(new Date(base.getTime() + weeks*7*86400000));  // 周期整体推进，0% 期间不补发历史利息
+  });
+  if(total > 0){
+    pushLedger("interest", 0, "存钱罐利息 +"+total+"☀️");
+    if(c.badgeStats) c.badgeStats.piggyInterest = true;   // FR-31 储蓄首息
+    celebrate({ type:"interest", text:"存钱罐长出 "+total+"☀️ 利息" });
+    save();
   }
-  c.piggyBank.lastInterestDate = today;
-  save();
-  return interest;
+  return total;
 }
 
 function renderPiggyBank(){
   const c = cur(); if(!c) return;
   const el = document.getElementById("piggyBankCard"); if(!el) return;
-  const rate = Math.round(c.piggyBank.weeklyRate * 100);
+  const rate = Math.round(c.piggyBank.weeklyRate * 1000) / 10;
+  const bal = piggyBalanceOf(c.piggyBank);
+  let line = "";
+  if(c.piggyBank.weeklyRate > 0){
+    // PRD「0% 时隐藏利息文案」：只在利率 >0 时展示利率与到账倒计时
+    line = '<div class="piggy-rate">周利率 '+rate+'% · 每周结算利息（利息存入罐中）';
+    if(bal > 0){
+      const days = piggyDaysToNextInterest(c.piggyBank);
+      line += '<br>' + (days > 0 ? ("⏳ 再存 "+days+" 天利息到账") : "💰 本周利息已到账");
+    }
+    line += '</div>';
+  }
   el.innerHTML = '<div class="piggy-title">🐷 阳光存钱罐</div>' +
-    '<div class="piggy-balance">'+c.piggyBank.balance+' ☀️</div>' +
-    '<div class="piggy-rate">周利率 '+rate+'% · 每周结算利息（利息存入罐中）</div>' +
+    '<div class="piggy-balance">'+bal+' ☀️</div>' + line +
     '<div class="piggy-actions">' +
     '<button class="btn" data-act="piggy-deposit" style="background:#3aa76d;color:#fff">💰 存入</button>' +
     '<button class="btn" data-act="piggy-withdraw" style="background:#f2994a;color:#fff">💸 取出</button>' +
@@ -2522,19 +2577,33 @@ async function promptPiggyDeposit(){
 
 async function promptPiggyWithdraw(){
   const c = cur(); if(!c) return;
-  const val = await showPrompt("从存钱罐取出的阳光值（余额 "+c.piggyBank.balance+"☀️）：", "50", { numeric:true });
+  const val = await showPrompt("从存钱罐取出的阳光值（余额 "+piggyBalanceOf(c.piggyBank)+"☀️）：", "50", { numeric:true });
   if(val !== null && val !== "") withdrawFromPiggy(val);
 }
 
-function promptPiggyRate(){
+async function promptPiggyRate(){
   const c = cur(); if(!c) return;
-  const val = prompt("存钱罐周利率（百分比，0~100）：", String(Math.round(c.piggyBank.weeklyRate*100)));
+  const curPct = Math.round(c.piggyBank.weeklyRate * 1000) / 10;
+  const val = await showPrompt("存钱罐周利率（%，0~10，可一位小数）：", String(curPct), { numeric:true, decimal:true });
   if(val === null || val === "") return;
   const pct = parseFloat(val);
-  if(isNaN(pct) || pct < 0 || pct > 100){ toast("利率需在 0~100 之间"); return; }
+  if(isNaN(pct) || pct < 0 || pct > 10){ toast("利率需在 0~10 之间"); return; }
   c.piggyBank.weeklyRate = pct / 100;
   save(); renderStore();
-  toast("周利率已设为 "+Math.round(pct)+"%");
+  toast("周利率已设为 "+(Math.round(pct*10)/10)+"%");
+}
+
+async function promptPiggyPenalty(){
+  const c = cur(); if(!c) return;
+  const on = c.piggyBank.earlyPenalty === 10;
+  const msg = on
+    ? "当前：提前取出未满 7 天的存款扣 10%。改回「原额取出」吗？"
+    : "当前：原额取出（PRD 默认）。改为「提前取出未满 7 天的存款扣 10%」吗？";
+  const ok = await showConfirm(msg, "🐷 提前取出惩罚");
+  if(!ok) return;
+  c.piggyBank.earlyPenalty = on ? 0 : 10;
+  save();
+  toast(c.piggyBank.earlyPenalty === 10 ? "已开启：提前取出扣 10%" : "已改回：原额取出");
 }
 /* ---------- N4 学习统计（家长报表可视化，纯 CSS，零依赖） ---------- */
 function dayKeyLocal(d){
@@ -3188,6 +3257,7 @@ function dismissToast(){
 /* ---------- O9 自定义确认/输入浮层（替代原生 confirm/prompt，统一 UX） ---------- */
 let _confirmResolve = null, _promptResolve = null;
 let _promptNumeric = false;   // FR-36：本次 showPrompt 是否为数字输入（决定是否可用大按键键盘）
+let _promptDecimal = false;   // FR-30：数字输入是否允许小数点（周利率 0~10 支持一位小数）
 function showConfirm(message, title){
   if (typeof globalThis !== "undefined" && typeof globalThis.__confirmHook === "function"){
     return globalThis.__confirmHook(message, title);            // 测试 / 注入钩子优先（O6 兼容回归脚本）
@@ -3211,6 +3281,7 @@ function _confirmCancel(){
 }
 function showPrompt(message, def, opts){
   _promptNumeric = !!(opts && opts.numeric);
+  _promptDecimal = _promptNumeric && !!(opts && opts.decimal);
   if (typeof globalThis !== "undefined" && typeof globalThis.__promptHook === "function"){
     return globalThis.__promptHook(message, def);             // 测试 / 注入钩子优先（O6 兼容回归脚本）
   }
@@ -3256,22 +3327,25 @@ function isTouchPointer(){
 }
 const NUMPAD_KEYS = ["1","2","3","4","5","6","7","8","9","clear","0","del"];
 /* 键盘标记：写进目标输入框，只产生数字与删改，不做任何数值解释 */
-function numPadHTML(targetId){
+function numPadHTML(targetId, decimal){
   if(!targetId) return "";
+  /* decimal 场景（FR-30 周利率）：以「.」占 clear 位——利率仅 0~10 一位小数、maxlength=5，
+     连按 del 即可清空，换来 3 列网格 12 键整版布局，不另起 4 列样式 */
+  const keys = decimal ? ["1","2","3","4","5","6","7","8","9",".","0","del"] : NUMPAD_KEYS;
   const cell = k => {
     const isFn = (k === "clear" || k === "del");
     const label = k === "clear" ? "清空" : (k === "del" ? "删除" : k);
     return '<button type="button" class="num-key'+(isFn?" num-key-fn":"")+'" data-act="num-key" data-pad="'+escapeHtml(targetId)+'" data-key="'+k+'">'+label+'</button>';
   };
-  return '<div class="num-pad" role="group" aria-label="数字键盘">'+NUMPAD_KEYS.map(cell).join("")+'</div>';
+  return '<div class="num-pad" role="group" aria-label="数字键盘">'+keys.map(cell).join("")+'</div>';
 }
 /* 把键盘填进各浮层的插槽，并把触屏状态挂到根元素（CSS 据此显隐） */
 function renderNumPads(){
   if (typeof document === "undefined") return;
-  const slots = [["pinPad","pinInput"], ["promptPad","promptInput"]];
+  const slots = [["pinPad","pinInput",false], ["promptPad","promptInput",_promptDecimal]];
   slots.forEach(pair=>{
     const el = document.getElementById(pair[0]);
-    if(el) el.innerHTML = numPadHTML(pair[1]);
+    if(el) el.innerHTML = numPadHTML(pair[1], pair[2]);
   });
   const compact = isCompactInput();
   const root = document.documentElement;
@@ -3282,8 +3356,8 @@ function renderNumPads(){
   const dlg = document.getElementById("promptDialog");
   const pinput = document.getElementById("promptInput");
   if(pinput){
-    // FR-36：数字场景补上「原生约束」——金额/天数框此前无 maxlength，大键盘可无限追加
-    if(_promptNumeric){ pinput.setAttribute("maxlength","9"); pinput.setAttribute("inputmode","numeric"); }
+    // FR-36：数字场景补上「原生约束」——金额/天数框此前无 maxlength，大键盘可无限追加；FR-30 利率带小数点故上限 5 位
+    if(_promptNumeric){ pinput.setAttribute("maxlength", _promptDecimal ? "5" : "9"); pinput.setAttribute("inputmode", _promptDecimal ? "decimal" : "numeric"); }
     else { pinput.removeAttribute("maxlength"); pinput.setAttribute("inputmode","text"); }
     pinput.readOnly = coarse && !!(dlg && dlg.classList && dlg.classList.contains("num"));
   }
@@ -3296,6 +3370,13 @@ function applyNumKey(targetId, key){
   let v = (typeof inp.value === "string") ? inp.value : "";
   if(key === "clear"){ v = ""; }
   else if(key === "del"){ v = v.slice(0, -1); }
+  else if(key === "."){
+    // FR-30 小数点：只允许一个；空串自动补前导 0，避免「.5」这类易误读形态
+    const maxDot = parseInt(inp.getAttribute("maxlength") || "0", 10) || 0;
+    if(maxDot > 0 && v.length >= maxDot){ inp.value = v; return v; }
+    if(v.indexOf(".") >= 0){ inp.value = v; return v; }
+    v = (v === "") ? "0." : v + ".";
+  }
   else if(/^[0-9]$/.test(key)){
     const max = parseInt(inp.getAttribute("maxlength") || "0", 10) || 0;
     if(max > 0 && v.length >= max){ inp.value = v; return v; }
@@ -3671,6 +3752,7 @@ const DISPATCH = {
   "piggy-deposit": () => promptPiggyDeposit(),
   "piggy-withdraw": () => promptPiggyWithdraw(),
   "piggy-rate": () => promptPiggyRate(),
+  "piggy-penalty": () => promptPiggyPenalty(),
   "redeem-theme": t => requestRedeemTheme(t.getAttribute("data-theme-id")),
   "use-theme": t => useTheme(t.getAttribute("data-theme-id")),
   "open-weekly": () => openWeeklyReport(),
@@ -3870,7 +3952,8 @@ var __APP__ = {
   openWheelDialog: openWheelDialog, spinWheel: spinWheel, drawWheelCanvas: drawWheelCanvas,
   depositToPiggy: depositToPiggy, withdrawFromPiggy: withdrawFromPiggy,
   settlePiggyInterest: settlePiggyInterest, renderPiggyBank: renderPiggyBank,
-  promptPiggyDeposit: promptPiggyDeposit, promptPiggyWithdraw: promptPiggyWithdraw, promptPiggyRate: promptPiggyRate,
+  piggyBalanceOf: piggyBalanceOf, piggyDaysToNextInterest: piggyDaysToNextInterest,
+  promptPiggyDeposit: promptPiggyDeposit, promptPiggyWithdraw: promptPiggyWithdraw, promptPiggyRate: promptPiggyRate, promptPiggyPenalty: promptPiggyPenalty,
   defaultThemes: defaultThemes, findTheme: findTheme, themeOwned: themeOwned,
   useTheme: useTheme, redeemTheme: redeemTheme, requestRedeemTheme: requestRedeemTheme, renderThemeShop: renderThemeShop,
   get pendingThemeId(){ return pendingThemeId; }, set pendingThemeId(v){ pendingThemeId = v; },

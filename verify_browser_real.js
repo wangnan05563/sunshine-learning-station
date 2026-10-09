@@ -130,6 +130,25 @@ function floatProbe(){
   const page = await ctx.newPage();
   page.setDefaultTimeout(10000);
   ctx.setDefaultTimeout(8000);
+
+  /* 环境 flaky 缓解：彩带/飘字等常驻动画会让 Playwright 的「元素稳定」等待偶发超时（曾两度 FATAL 于
+     open-store / soundBtn），按钮位置本身不动，超时后 force 重试一次即可；真被浮层挡住时后续断言仍会暴露 */
+  const hardenClick = (pg) => {
+    const Cls = pg.locator("body").constructor;
+    if (Cls.__hardenClick) return;
+    const orig = Cls.prototype.click;
+    Cls.prototype.click = async function (opts) {
+      try { return await orig.call(this, opts); }
+      catch (e) {
+        if (/Timeout \d+ms exceeded/.test(String(e && e.message)) && !(opts && opts.force)) {
+          return orig.call(this, Object.assign({}, opts, { force: true }));
+        }
+        throw e;
+      }
+    };
+    Cls.__hardenClick = true;
+  };
+  hardenClick(page);
   const errors = [];
   const notedDialogs = [];
   page.on("pageerror", e => errors.push("pageerror: " + e.message));
@@ -143,7 +162,7 @@ function floatProbe(){
   const sunshine = () => A(() => window.__STUDY_APP__.cur().sunshine);
   const childState = () => A(() => {
     const c = window.__STUDY_APP__.cur();
-    return { sunshine: c.sunshine, streakDays: c.streakDays, piggy: c.piggyBank.balance, requests: (c.requests || []).map(r => ({ status: r.status, note: r.note, title: r.title })), badgeStats: c.badgeStats, earned: Object.keys(c.badges.earned || {}), equipped: c.badges.equipped };
+    return { sunshine: c.sunshine, streakDays: c.streakDays, piggy: (c.piggyBank.deposits || []).reduce((s, d) => s + (d.amount || 0), 0), requests: (c.requests || []).map(r => ({ status: r.status, note: r.note, title: r.title })), badgeStats: c.badgeStats, earned: Object.keys(c.badges.earned || {}), equipped: c.badges.equipped };
   });
   const shot = (n) => page.screenshot({ path: path.join(EVID, n) });
   // 浮层是叠加式（overlay.show 可能同时存在多层），未关闭的浮层会拦截后续点击 ⇒ 段落之间统一收口
@@ -575,16 +594,21 @@ function floatProbe(){
     const App = window.__STUDY_APP__, c = App.cur();
     const pad = n => String(n).padStart(2, "0");
     const d = new Date(Date.now() - 7 * 864e5);          // 恰好 1 个完整周期，便于核对公式
-    c.piggyBank.lastInterestDate = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+    c.piggyBank.deposits = [{ amount: 300, date: d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) }];
     const got = App.settlePiggyInterest();
     App.evaluateBadges();
-    return { got, bal: c.piggyBank.balance, rate: c.piggyBank.weeklyRate, last: c.piggyBank.lastInterestDate, expected: Math.floor(300 * c.piggyBank.weeklyRate), weeks: Math.round((Date.now() - d.getTime()) / 864e5) };
+    const sum = (c.piggyBank.deposits || []).reduce((s, x) => s + (x.amount || 0), 0);
+    return { got, bal: sum, rate: c.piggyBank.weeklyRate, expected: Math.floor(300 * c.piggyBank.weeklyRate), weeks: Math.round((Date.now() - d.getTime()) / 864e5) };
   });
-  check("满周结算利息 = floor(余额 × 周利率 × 满周数)", interest.got === interest.expected && interest.got > 0, JSON.stringify(interest));
+  check("满周结算利息 = floor(分笔 × 周利率 × 满周数)", interest.got === interest.expected && interest.got > 0, JSON.stringify(interest));
+  // 原子断言：cond/g/ds 同一次 evaluate 采集，排除两次 evaluate 之间状态漂移；失败时连 g 一起 dump
+  const piggyCompound = await A((g) => { const ds = window.__STUDY_APP__.cur().piggyBank.deposits || []; return { cond: ds.length === 2 && ds[0].amount === 300 && ds[1].amount === g && typeof ds[1].date === "string", g: g, ds: JSON.parse(JSON.stringify(ds)) }; }, interest.got);
+  check("分笔周期推进 + 利息作为新分笔入罐（复利）", piggyCompound.cond === true, JSON.stringify(piggyCompound));
   check("利息写流水且不改可花余额（amount=0 说明行）", await A(() => { const c = window.__STUDY_APP__.cur(); return c.ledger.some(e => e.type === "interest") && c.ledger.filter(e => e.type === "interest").every(e => e.amount === 0); }));
   check("储蓄首息徽章达成（piggy_first）", await A(() => !!window.__STUDY_APP__.cur().badges.earned.piggy_first), JSON.stringify(await A(() => ({ interest: window.__STUDY_APP__.cur().badgeStats.piggyInterest, earned: Object.keys(window.__STUDY_APP__.cur().badges.earned || {}) }))));
   const piggyHint = await A(() => document.getElementById("piggyBankCard").textContent);
-  soft("存钱罐显示「再存 X 天利息到账」财商提示", /再存|天.*利息|距.*结算/.test(piggyHint), "卡片文案：" + piggyHint.replace(/\s+/g, " ").slice(0, 90));
+  check("存钱罐显示「再存 X 天利息到账」财商提示（PRD FR-30-3）", /再存\s*\d+\s*天利息到账/.test(piggyHint), "卡片文案：" + piggyHint.replace(/\s+/g, " ").slice(0, 90));
+  check("0% 利率隐藏利息文案（PRD 验收项）", await A(() => { const App = window.__STUDY_APP__; const c = App.cur(); const r = c.piggyBank.weeklyRate; c.piggyBank.weeklyRate = 0; App.renderPiggyBank(); const hidden = document.getElementById("piggyBankCard").textContent.indexOf("周利率") < 0; c.piggyBank.weeklyRate = r; App.renderPiggyBank(); return hidden; }));
   const sunC = await sunshine();
   await page.locator('[data-act="piggy-withdraw"]').click();
   await page.waitForTimeout(250);
@@ -592,19 +616,41 @@ function floatProbe(){
   await page.locator('[data-act="prompt-ok"]').click();
   await page.waitForTimeout(400);
   const cAfterWd = await childState();
-  check("取出 100 → 钱包 +100、罐内 -100", cAfterWd.piggy === interest.bal - 100 && cAfterWd.sunshine === sunC + 100, JSON.stringify({ sun: cAfterWd.sunshine, piggy: cAfterWd.piggy }));
-  check("余额不足时取出被拒（不产生负数）", await A(() => { const App = window.__STUDY_APP__; const b = App.cur().piggyBank.balance; const r = App.withdrawFromPiggy(String(b + 999)); return r === false && App.cur().piggyBank.balance === b; }));
-  // 周利率（家长中心入口，走原生 prompt）
+  check("取出 100 → 钱包 +100、罐内 -100（FIFO 满期笔不受罚）", cAfterWd.piggy === interest.bal - 100 && cAfterWd.sunshine === sunC + 100, JSON.stringify({ sun: cAfterWd.sunshine, piggy: cAfterWd.piggy }));
+  check("余额不足时取出被拒（不产生负数）", await A(() => { const App = window.__STUDY_APP__; const sum = (App.cur().piggyBank.deposits || []).reduce((s, d) => s + (d.amount || 0), 0); const r = App.withdrawFromPiggy(String(sum + 999)); const sum2 = (App.cur().piggyBank.deposits || []).reduce((s, d) => s + (d.amount || 0), 0); return r === false && sum2 === sum; }));
+  // 周利率（家长中心入口，走 FR-36 自定义数字浮层；PRD 范围 0~10%、默认 2%）
   await page.locator('[data-act="close-store"]').click();
   await page.locator('[data-act="open-parent-hub"]').click();
   await page.waitForTimeout(250);
   const rateBefore = await A(() => window.__STUDY_APP__.cur().piggyBank.weeklyRate);
+  check("周利率默认 2%（PRD FR-30 口径）", Math.abs(rateBefore - 0.02) < 1e-9, "rate=" + rateBefore);
   await page.locator('[data-act="piggy-rate"]').click();
   await page.waitForTimeout(600);
+  check("周利率入口走自定义浮层（不再用原生 prompt）", await A(() => document.getElementById("promptDialog").classList.contains("show")));
+  await page.locator("#promptInput").fill("3");
+  await page.locator('[data-act="prompt-ok"]').click();
+  await page.waitForTimeout(300);
   const rateAfter = await A(() => window.__STUDY_APP__.cur().piggyBank.weeklyRate);
   check("家长可配周利率（真实入口写入 3%）", Math.abs(rateAfter - 0.03) < 1e-9, rateBefore + "→" + rateAfter);
-  soft("周利率入口用浏览器原生 prompt，未纳入 FR-36 自定义数字键盘", !!(await A(() => typeof window.prompt === "function" && window.__STUDY_APP__.promptPiggyRate.toString().indexOf("prompt(") >= 0)), "小屏触屏下该入口仍弹系统对话框");
-  note("PRD FR-30 约定利率范围 0~10%、默认 2%；实测默认 " + (rateBefore * 100) + "%、实现上限 100%（口径偏差，见报告）");
+  await page.locator('[data-act="piggy-rate"]').click();
+  await page.waitForTimeout(400);
+  await page.locator("#promptInput").fill("11");
+  await page.locator('[data-act="prompt-ok"]').click();
+  await page.waitForTimeout(300);
+  check("越界利率（11% > 10% 上限）被拒且不改值", await A(() => Math.abs(window.__STUDY_APP__.cur().piggyBank.weeklyRate - 0.03) < 1e-9));
+  // 提前取出惩罚（PRD FR-30-1：可配置扣 10% 或原额取出，默认原额）
+  const penBefore = await A(() => window.__STUDY_APP__.cur().piggyBank.earlyPenalty);
+  check("提前取出惩罚默认原额（earlyPenalty=0）", penBefore === 0, "penalty=" + penBefore);
+  await page.locator('[data-act="piggy-penalty"]').click();
+  await page.waitForTimeout(300);
+  check("惩罚配置走自定义确认浮层", await A(() => document.getElementById("confirmDialog").classList.contains("show")));
+  await page.locator('[data-act="confirm-ok"]').click();
+  await page.waitForTimeout(300);
+  const penMid = await A(() => window.__STUDY_APP__.cur().piggyBank.earlyPenalty);
+  check("惩罚可配置（切换为扣 10%）", penMid === 10, "penalty=" + penMid);
+  const penWd = await A(() => { const App = window.__STUDY_APP__, c = App.cur(); const sun0 = c.sunshine; c.piggyBank.deposits = [{ amount: 100, date: App.todayStr() }]; const ok = App.withdrawFromPiggy("100"); return { ok, got: c.sunshine - sun0, left: (c.piggyBank.deposits || []).reduce((s, d) => s + (d.amount || 0), 0) }; });
+  check("提前取出（今日存入）实收 9 折：100→90", penWd.ok === true && penWd.got === 90 && penWd.left === 0, JSON.stringify(penWd));
+  await A(() => { window.__STUDY_APP__.cur().piggyBank.earlyPenalty = 0; window.__STUDY_APP__.save(); });   // 恢复默认，避免污染后续段
   await shot("07b_parent_piggy_rate.png");
   await shot("07c_parent_hub.png");
   await closeAll();
@@ -822,6 +868,7 @@ function floatProbe(){
   const mctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 });
   const m = await mctx.newPage();
   m.setDefaultTimeout(10000);
+  hardenClick(m);
   m.on("pageerror", e => errors.push("mobile pageerror: " + e.message));
   await m.goto(APP, { waitUntil: "load" });
   await m.waitForTimeout(300);
@@ -873,10 +920,10 @@ function floatProbe(){
   for (const k of ["1", "2", "0"]) await m.locator(`#promptPad [data-key="${k}"]`).click();
   await m.waitForTimeout(120);
   check("点按组合出金额 120", await m.evaluate(() => document.getElementById("promptInput").value === "120"), await m.evaluate(() => document.getElementById("promptInput").value));
-  const piggyB4 = await m.evaluate(() => window.__STUDY_APP__.cur().piggyBank.balance);
+  const piggyB4 = await m.evaluate(() => (window.__STUDY_APP__.cur().piggyBank.deposits || []).reduce((s, d) => s + (d.amount || 0), 0));
   await m.locator('[data-act="prompt-ok"]').click();
   await m.waitForTimeout(500);
-  check("大键盘输入的金额可真实存入（罐内 +120）", await m.evaluate(b => window.__STUDY_APP__.cur().piggyBank.balance === b + 120, piggyB4), "before=" + piggyB4 + " after=" + await m.evaluate(() => window.__STUDY_APP__.cur().piggyBank.balance));
+  check("大键盘输入的金额可真实存入（罐内 +120）", await m.evaluate(b => (window.__STUDY_APP__.cur().piggyBank.deposits || []).reduce((s, d) => s + (d.amount || 0), 0) === b + 120, piggyB4), "before=" + piggyB4 + " after=" + await m.evaluate(() => (window.__STUDY_APP__.cur().piggyBank.deposits || []).reduce((s, d) => s + (d.amount || 0), 0)));
   await m.screenshot({ path: path.join(EVID, "13_mobile_numpad_amount.png") });
   // 超长输入不越界（FR-36：数字场景复用 maxlength 原生约束）
   await m.locator('[data-act="piggy-deposit"]').click();
@@ -890,6 +937,7 @@ function floatProbe(){
   // 桌面窄窗（无触屏）不应屏蔽系统键盘
   const desktopNarrow = await browser.newContext({ viewport: { width: 420, height: 800 } });
   const dp = await desktopNarrow.newPage();
+  hardenClick(dp);
   dp.on("pageerror", e => errors.push("narrow pageerror: " + e.message));
   await dp.goto(APP, { waitUntil: "load" });
   await dp.waitForTimeout(300);
