@@ -5,10 +5,12 @@
 - assets/social-preview.png  —— GitHub 社交预览图（严格 1280×640）
 
 纯 Pillow 绘制（4× 超采样后降采样），中文字体取系统 Microsoft YaHei。
-运行：python _gen_assets.py
+运行：python _gen_assets.py            # 全量重建
+      python _gen_assets.py preview    # 只重建社交预览图（logo 以 assets/logo.png 为源）
 """
 import math
 import os
+import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -193,10 +195,40 @@ def build_svg_logo():
     return fp
 
 
+def load_sun():
+    """预览图的太阳标识以 assets/logo.png 为源：logo 一旦更新，预览图重跑即跟随。
+    文件缺失时（首次构建）回退到 draw_sun 现算。"""
+    lp = os.path.join(OUT, "logo.png")
+    if os.path.exists(lp):
+        im = Image.open(lp)
+        if im.size == (1024, 1024) and im.mode == "RGBA":
+            return im
+    return draw_sun(1024)
+
+
+def checkin_matrix(d, x, y, cols=7, rows=2, cell=104, r=34):
+    """打卡日历点阵（FR-28 月历热力图的图形语言）——纯图形，不引入文字。
+    x/y/cell/r 均按 CSS px 传入，内部乘超采样倍率。"""
+    pat = [
+        [2, 2, 1, 2, 2, 2, 0],
+        [2, 1, 2, 2, 2, 0, 1],
+    ]
+    c, rad = cell * SS, r * SS
+    for ry in range(rows):
+        for cx in range(cols):
+            lvl = pat[ry % len(pat)][cx % len(pat[0])]
+            px, py = x + cx * c, y + ry * c
+            box = [px, py, px + rad * 2, py + rad * 2]
+            if lvl == 0:
+                d.ellipse(box, outline=(208, 170, 122), width=int(3 * SS))
+            else:
+                col = (255, 190, 105) if lvl == 1 else lerp(SUN_HI, SUN_LO, 0.86)
+                d.ellipse(box, fill=col)
+
+
 def build_preview(sun):
     w, h = W * SS, H * SS
     img = diagonal_gradient(w, h, BG_TL, BG_BR).convert("RGBA")
-    d = ImageDraw.Draw(img)
 
     # 右上暖光晕
     glow = radial_glow(int(1100 * SS / 2) * 2, GLOW, strength=0.42)
@@ -204,86 +236,61 @@ def build_preview(sun):
     # 左下淡光晕
     glow2 = radial_glow(int(700 * SS / 2) * 2, (255, 213, 128), strength=0.30)
     img.alpha_composite(glow2, dest=(int(-180 * SS), int(380 * SS)))
+
+    # 右下装饰太阳水印（让位给点阵带，只占右侧空白区）
+    wm = sun.resize((int(460 * SS), int(460 * SS)), Image.LANCZOS)
+    wm.putalpha(wm.getchannel("A").point(lambda a: int(a * 0.12)))
+    img.alpha_composite(wm, dest=(int(940 * SS), int(300 * SS)))
     d = ImageDraw.Draw(img)
 
-    # 右下装饰太阳水印
-    wm = sun.resize((int(520 * SS), int(520 * SS)), Image.LANCZOS)
-    wm.putalpha(wm.getchannel("A").point(lambda a: int(a * 0.16)))
-    img.alpha_composite(wm, dest=(int(870 * SS), int(240 * SS)))
-    d = ImageDraw.Draw(img)
-
-    # 左侧 logo
-    logo_size = int(176 * SS)
+    # 左侧 logo：视觉焦点，缩略到 480px 宽后仍占约 1/5 画幅
+    logo_size = int(212 * SS)
     lg = sun.resize((logo_size, logo_size), Image.LANCZOS)
-    lx, ly = int(96 * SS), int(238 * SS)
-    img.alpha_composite(lg, dest=(lx, ly))
+    img.alpha_composite(lg, dest=(int(96 * SS), int(146 * SS)))
     d = ImageDraw.Draw(img)
 
-    tx = int(316 * SS)
+    tx = int(364 * SS)
+    f_title = font(FONT_BOLD, int(86 * SS))
+    f_sub = font(FONT_REG, int(33 * SS))
 
-    f_title = font(FONT_BOLD, int(74 * SS))
-    f_en = font(FONT_REG, int(28 * SS))
-    f_sub = font(FONT_REG, int(31 * SS))
+    # 文字严格两行（约束：不超过两行）
+    d.text((tx, int(132 * SS)), "阳光学习能量站", font=f_title, fill=INK)
+    d.text((tx, int(268 * SS)), "单文件 · 离线 · 零依赖的儿童学习打卡工作台",
+           font=f_sub, fill=(92, 70, 51))
 
-    title = "阳光学习能量站"
-    d.text((tx, int(228 * SS)), title, font=f_title, fill=INK)
-
-    en = "S U N S H I N E   L E A R N I N G   S T A T I O N"
-    d.text((tx + int(4 * SS), int(336 * SS)), en, font=f_en, fill=INK_SUB)
-
-    sub = "单文件 · 离线 · 零依赖 的儿童学习打卡工作台"
-    d.text((tx, int(392 * SS)), sub, font=f_sub, fill=(92, 70, 51))
-
-    # 分隔线
-    d.line([(int(96 * SS), int(464 * SS)), (int(760 * SS), int(464 * SS))],
+    # 分隔线 + 打卡点阵带（图形化交代「这是什么产品」，不增加文字行）
+    d.line([(tx, int(356 * SS)), (int(920 * SS), int(356 * SS))],
            fill=(226, 190, 140), width=int(2 * SS))
-
-    # 功能标签
-    chips = ["单元任务打卡", "阳光值激励", "连续打卡", "兑换商店",
-             "本地周报", "专注计时", "多人竞速", "家长中心"]
-    f_chip = font(FONT_REG, int(25 * SS))
-    pad_x, pad_y = int(20 * SS), int(11 * SS)
-    gap = int(14 * SS)
-    gap_y = int(16 * SS)
-    x, y = int(96 * SS), int(482 * SS)
-    row_x = x
-    max_right = int(1184 * SS)
-    for c in chips:
-        tw = text_w(d, c, f_chip)
-        cw = tw + pad_x * 2
-        ch = int(25 * SS) + pad_y * 2
-        if row_x + cw > max_right:  # 换行
-            x = int(96 * SS)
-            row_x = x
-            y += ch + gap_y
-        rounded_rect(d, [x, y, x + cw, y + ch], radius=ch // 2,
-                     fill=(255, 255, 255, 205), outline=(240, 197, 130), width=int(2 * SS))
-        d.text((x + pad_x, y + pad_y - int(2 * SS)), c, font=f_chip, fill=(120, 88, 50))
-        x += cw + gap
-        row_x = x
+    checkin_matrix(d, tx, int(398 * SS), cell=84, r=26)
 
     img = img.resize((W, H), Image.LANCZOS)
     img.convert("RGB").save(os.path.join(OUT, "social-preview.png"), optimize=True)
 
 
+def verify_preview():
+    p = os.path.join(OUT, "social-preview.png")
+    im = Image.open(p)
+    assert im.size == (1280, 640), im.size
+    size = os.path.getsize(p)
+    assert 0 < size < 1024 * 1024, size   # GitHub 社交预览上限 1MB
+    print("social-preview.png", im.size, im.mode, size, "bytes")
+    return p
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "preview":
+        build_preview(load_sun())
+        verify_preview()
+        return
     sun = build_logo()
-    build_preview(sun)
-    favicon = build_favicon(sun)
-    svg = build_svg_logo()
-    for name in ("logo.png", "social-preview.png"):
-        p = os.path.join(OUT, name)
-        im = Image.open(p)
-        print(name, im.size, im.mode, os.path.getsize(p), "bytes")
-        assert os.path.getsize(p) > 0
-    sp = Image.open(os.path.join(OUT, "social-preview.png"))
-    assert sp.size == (1280, 640), sp.size
-    ico = Image.open(favicon)
-    print("favicon.ico", ico.size, os.path.getsize(favicon), "bytes")
-    assert os.path.getsize(favicon) > 0
-    print("logo.svg", os.path.getsize(svg), "bytes")
-    assert os.path.getsize(svg) > 0
+    build_favicon(sun)
+    build_svg_logo()
+    print("logo.png", Image.open(os.path.join(OUT, "logo.png")).size,
+          os.path.getsize(os.path.join(OUT, "logo.png")), "bytes")
+    build_preview(load_sun())
+    verify_preview()
 
 
 if __name__ == "__main__":
     main()
+
