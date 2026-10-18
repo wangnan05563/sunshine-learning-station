@@ -1,0 +1,152 @@
+{
+  "$schema_note": "本文件是 tooling/scripts 下全部脚本的唯一参数来源。脚本内不得出现项目名/路径/版本/仓库坐标字面量。",
+  "project": {
+    "name": "阳光学习能量站",
+    "slug": "SunshineStation",
+    "repo": "wangnan05563/sunshine-learning-station",
+    "version_source": {
+      "file": "阳光学习能量站-需求规格说明书.md",
+      "pattern": "版本：(v[0-9]+(?:\\.[0-9]+)*)",
+      "fallback": "git_describe",
+      "strip_prefix": "v"
+    }
+  },
+  "encoding": {
+    "bat_strategy": "ascii_only",
+    "bat_chcp": 65001,
+    "ps1_bom": true,
+    "py_encoding": "utf-8",
+    "line_ending": "CRLF",
+    "child_pythonioencoding": "utf-8",
+    "note": "子进程 Python 默认按 ANSI(cp936) 写 stdout，被 chcp 65001 的控制台按 UTF-8 解码即乱码；故流水线启动前按本字段设置 PYTHONIOENCODING",
+    "single_source_of_truth": true
+  },
+  "paths": {
+    "scripts_dir": "tooling/scripts",
+    "repo_root_depth": "..\\..",
+    "release_dir": "release"
+  },
+  "runtime": {
+    "python_candidates": ["python", "python3"],
+    "node_candidates": ["node"],
+    "note": "候选按顺序探测：先 Test-Path/Get-Command 命中即用，禁止写死用户目录绝对路径"
+  },
+  "source_files": {
+    "app_single_file": "阳光学习能量站.html",
+    "license": "LICENSE",
+    "readme": "README.md",
+    "docs": ["阳光学习能量站-需求规格说明书.md", "阳光学习能量站-概要设计说明书.md", "阳光学习能量站-详细设计说明书.md"]
+  },
+  "build_pipeline": {
+    "steps": [
+      {
+        "id": "stub_regression",
+        "name": "DOM 桩回归（逻辑断言）",
+        "command": "node verify_dom_stub.js",
+        "expect_pattern": "([0-9]+) passed, ([0-9]+) failed",
+        "require_zero_failed": true,
+        "on_fail": "stop"
+      },
+      {
+        "id": "assemble_release",
+        "name": "红线门禁 + 发布资产组装",
+        "command": "python tooling/scripts/assemble-release.py --config tooling/scripts/config.json",
+        "on_fail": "stop"
+      },
+      {
+        "id": "rebuild_docs",
+        "name": "说明书 docx/pdf 重生成（仅文档变更时需要，默认跳过）",
+        "command": "python _build_docs.py",
+        "enabled": false,
+        "on_fail": "warn"
+      }
+    ]
+  },
+  "release_gate": {
+    "enabled": true,
+    "targets": ["阳光学习能量站.html"],
+    "max_bytes": 400000,
+    "min_bytes": 100000,
+    "forbidden_patterns": [
+      "<script[^>]+src\\s*=\\s*[\"']https?://",
+      "<link[^>]+href\\s*=\\s*[\"']https?://",
+      "@import\\s+url\\(\\s*[\"']?https?://",
+      "\\bintegrity\\s*=\\s*[\"']",
+      "cdn\\.[a-z0-9.-]+/",
+      "\\.jsdelivr\\.net",
+      "\\.unpkg\\.com",
+      "fonts\\.googleapis\\.com"
+    ],
+    "secret_patterns": [
+      "gh[pousr]_[A-Za-z0-9]{36,}",
+      "github_pat_[A-Za-z0-9_]{20,}",
+      "sk-[A-Za-z0-9]{20,}",
+      "AKIA[0-9A-Z]{16}",
+      "Bearer\\s+[A-Za-z0-9._-]{32,}"
+    ],
+    "packaged_files_must_not_match": ["\\.env$"],
+    "allow_local_relative_refs": true,
+    "notes": "fetch( 不作禁用项：WebDAV 同步是用户自填地址且默认关闭；占位提示文案含中文域名，不在禁止名单内"
+  },
+  "release_assets": {
+    "zip": {
+      "name_template": "{{slug}}-{{ver}}.zip",
+      "entries": [
+        {"src": "阳光学习能量站.html", "dest": "阳光学习能量站.html"},
+        {"src": "{{slug}}-{{ver}}.html", "dest": "{{slug}}-{{ver}}.html", "generated_by": "single_file_copy"},
+        {"src": "LICENSE", "dest": "LICENSE"},
+        {"src": "README.md", "dest": "README.md"}
+      ],
+      "exclude_patterns": ["\\.env", "release/", "\\.workbuddy/", "__pycache__/", "\\.git/"]
+    },
+    "single_html": {
+      "name_template": "{{slug}}-{{ver}}.html",
+      "src": "阳光学习能量站.html"
+    }
+  },
+  "github_release": {
+    "enabled": true,
+    "repo": "wangnan05563/sunshine-learning-station",
+    "api_base": "https://api.github.com",
+    "tag_source": "project_version_source",
+    "draft": false,
+    "prerelease": false,
+    "dry_run": false,
+    "confirm_before_publish": true,
+    "confirm_prompt": "确认发布到 GitHub Releases？输入 YES 继续，其它任意键取消",
+    "assets": [
+      {"dir": "release", "glob": "{{slug}}-{{ver}}.zip", "exclude_patterns": ["*-arm64*"], "display_name_template": "{{slug}}-{{ver}}.zip"},
+      {"dir": "release", "glob": "{{slug}}-{{ver}}.html", "exclude_patterns": ["*-arm64*"], "display_name_template": "{{slug}}-{{ver}}.html"}
+    ],
+    "notes": {
+      "path_template": "release-notes-{{ver}}.md",
+      "auto_generate": true,
+      "auto_generate_git_log": "--no-merges --oneline -20",
+      "auto_generate_notice": "（自动生成的发布说明，正式发布前请替换为正式说明。）",
+      "template_file": "tooling/scripts/RELEASE-NOTES.template.md",
+      "encoding_fallback": ["utf-8", "gbk", "locale"]
+    },
+    "publish_script": "tooling/scripts/publish-release.py",
+    "token": {"env_var_name": "GH_TOKEN", "dotenv_files": [".env"], "git_credential_host": "github.com"},
+    "release_url_template": "https://github.com/{{repo}}/releases/tag/{{tag}}"
+  },
+  "entries": [
+    {"bat_file": "一键发布.bat", "ps1_file": "build-publish.ps1", "kind": "build_publish", "config_file": "config.json"}
+  ],
+  "companion_files": ["config.json", "build-publish.ps1", "assemble-release.py", "publish-release.py", "verify.ps1", ".env.example", "RELEASE-NOTES.template.md"],
+  "bracket_check": {
+    "scan_globs": ["tooling/scripts/*.bat"],
+    "treat_literal_parens_in_code_as_error": false,
+    "ignore_in_strings": true,
+    "error_if_non_ascii_in_bat": true
+  },
+  "verify": {
+    "checks": ["bat_ascii_only", "bat_no_bom", "crlf_only", "ps1_bom_exactly_one", "ps1_parser", "py_compile", "config_parses", "bracket_scan", "gitignore_covers_env_and_release", "cmd_smoke"],
+    "cmd_smoke": {
+      "enabled": true,
+      "command": "cmd /c \"\"{{scripts_dir}}\\{{bat_file}}\" --selftest\"",
+      "expect_substring": "SELFTEST OK"
+    }
+  },
+  "gitignore_extra": [".env", "release/"]
+}

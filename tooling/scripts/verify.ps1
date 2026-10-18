@@ -1,0 +1,142 @@
+﻿#Requires -Version 5.1
+<#
+.SYNOPSIS
+    脚本套件字节级校验：编码 / 行尾 / BOM / 括号陷阱 / 语法 / 配置一致性 / 冒烟
+.DESCRIPTION
+    校验项来自 config.verify.checks，任何一项 FAIL 即非零退出。
+    本文件同样由生成器产出，请勿手改（改 templates + config 后重跑 _gen_scripts.py）。
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$ConfigPath,
+    [Parameter(Mandatory = $true)][string]$RepoRoot,
+    [switch]$SkipSmoke
+)
+
+$ErrorActionPreference = 'Stop'
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+$script:Fail = 0
+function Check($name, $ok, $detail) {
+    if ($ok) { Write-Host ("  PASS  {0}" -f $name) -ForegroundColor Green }
+    else {
+        Write-Host ("  FAIL  {0}  {1}" -f $name, $detail) -ForegroundColor Red
+        $script:Fail++
+    }
+}
+
+if (-not (Test-Path -LiteralPath $ConfigPath)) { Write-Host "config 未找到: $ConfigPath"; exit 1 }
+$cfg = Get-Content -Raw -Encoding UTF8 $ConfigPath | ConvertFrom-Json
+$scriptsDir = Split-Path -Parent $ConfigPath
+
+Write-Host '=== 1) 字节级编码校验（.bat 纯 ASCII / .ps1 单 BOM / CRLF） ==='
+foreach ($f in (Get-ChildItem -LiteralPath $scriptsDir -File)) {
+    $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    $lf = ([regex]::Matches($text, "(?<!\r)\n")).Count
+    if ($f.Extension -eq '.bat') {
+        $nonAscii = @($bytes | Where-Object { $_ -gt 127 }).Count
+        $bom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+        Check ("{0} 非 ASCII 字节 = 0" -f $f.Name) ($nonAscii -eq 0) "命中 $nonAscii 字节（cmd 按 ANSI 解析会乱码）"
+        Check ("{0} 无 BOM" -f $f.Name) (-not $bom) 'BOM 会让 @echo off 失效'
+        Check ("{0} 无孤立 LF" -f $f.Name) ($lf -eq 0) "孤立 LF $lf 处"
+    }
+    if ($f.Extension -eq '.ps1') {
+        $bomCount = 0; $i = 0
+        while ($i + 2 -lt $bytes.Length) {
+            if ($bytes[$i] -eq 0xEF -and $bytes[$i + 1] -eq 0xBB -and $bytes[$i + 2] -eq 0xBF) { $bomCount++; $i += 3 } else { break }
+        }
+        Check ("{0} BOM 数量 = 1" -f $f.Name) ($bomCount -eq 1) "实为 $bomCount（0 => PS5.1 按 GBK 解析；>=2 => 双 BOM 报错）"
+        Check ("{0} 无孤立 LF" -f $f.Name) ($lf -eq 0) "孤立 LF $lf 处"
+    }
+    if ($f.Extension -eq '.tmpl') {
+        Check ("{0} 无 BOM" -f $f.Name) (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) '模板源应为 UTF-8 无 BOM'
+    }
+}
+
+Write-Host '=== 2) .bat 括号陷阱扫描（文案中的裸括号） ==='
+foreach ($glob in $cfg.bracket_check.scan_globs) {
+    $dir = Join-Path $RepoRoot (Split-Path -Parent $glob)
+    $leaf = Split-Path -Leaf $glob
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    foreach ($b in (Get-ChildItem -LiteralPath $dir -Filter $leaf)) {
+        $bad = @()
+        foreach ($line in (Get-Content -LiteralPath $b.FullName -Encoding UTF8)) {
+            $t = $line.Trim()
+            if ($t -match '^\s*REM\b') {
+                if ($t -match '[()]') { $bad += $t }
+            }
+            elseif ($t -match '^echo\b') {
+                $body = $t -replace '^echo\s*', ''
+                if ($body -match '[()]') { $bad += $t }
+            }
+        }
+        Check ("{0} echo/REM 无裸括号" -f $b.Name) ($bad.Count -eq 0) ($bad -join ' ||| ')
+    }
+}
+
+Write-Host '=== 3) 语法校验（PS Parser + py_compile） ==='
+foreach ($p in (Get-ChildItem -LiteralPath $scriptsDir -Filter '*.ps1')) {
+    $errs = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($p.FullName, [ref]$null, [ref]$errs)
+    Check ("{0} PowerShell 语法" -f $p.Name) ($null -eq $errs -or $errs.Count -eq 0) (($errs | ForEach-Object { $_.Message }) -join ' ||| ')
+}
+$py = $null
+foreach ($c in $cfg.runtime.python_candidates) {
+    $g = Get-Command $c -ErrorAction SilentlyContinue
+    if ($g) { $py = $g.Source; break }
+}
+if ($py) {
+    foreach ($m in (Get-ChildItem -LiteralPath $scriptsDir -Filter '*.py')) {
+        & $py -m py_compile $m.FullName 2>&1 | Out-Null
+        Check ("{0} python 语法" -f $m.Name) ($LASTEXITCODE -eq 0) 'py_compile 失败'
+    }
+} else {
+    Check 'python 解释器可用' $false '候选与 PATH 均未命中'
+}
+
+Write-Host '=== 4) 配置一致性与零硬编码 ==='
+$batName = $cfg.entries[0].bat_file
+$ps1Name = $cfg.entries[0].ps1_file
+Check '入口 .bat 存在' (Test-Path -LiteralPath (Join-Path $scriptsDir $batName)) $batName
+Check '逻辑 .ps1 存在' (Test-Path -LiteralPath (Join-Path $scriptsDir $ps1Name)) $ps1Name
+Check '发布器存在' (Test-Path -LiteralPath (Join-Path $RepoRoot $cfg.github_release.publish_script)) $cfg.github_release.publish_script
+Check '版本源存在' (Test-Path -LiteralPath (Join-Path $RepoRoot $cfg.project.version_source.file)) $cfg.project.version_source.file
+Check '门禁目标存在' (Test-Path -LiteralPath (Join-Path $RepoRoot $cfg.release_gate.targets[0])) $cfg.release_gate.targets[0]
+
+$lit = @()
+# 扫描范围限于可执行脚本与模板：config.json 是字面量的合法归宿（规则 3），不参与此检查
+$scanExt = @('.ps1', '.bat', '.py', '.tmpl')
+foreach ($p in (Get-ChildItem -LiteralPath $scriptsDir -File)) {
+    if ($scanExt -notcontains $p.Extension) { continue }
+    $body = Get-Content -LiteralPath $p.FullName -Raw -Encoding UTF8
+    if ($body -match 'C:\\Users\\') { $lit += ($p.Name + ' 含用户目录绝对路径') }
+    if ($body -match [regex]::Escape($cfg.project.name)) { $lit += ($p.Name + ' 硬编码项目名 ' + $cfg.project.name) }
+}
+Check '脚本零硬编码（无用户目录 / 无项目名字面量）' ($lit.Count -eq 0) ($lit -join ' ||| ')
+
+Write-Host '=== 5) 忽略规则（token 与产物不得入库） ==='
+$gi = Join-Path $RepoRoot '.gitignore'
+$giText = if (Test-Path -LiteralPath $gi) { Get-Content -LiteralPath $gi -Raw -Encoding UTF8 } else { '' }
+foreach ($need in $cfg.gitignore_extra) {
+    Check (".gitignore 覆盖 $need") ($giText -match [regex]::Escape($need)) '缺失，密钥或产物可能被提交'
+}
+Check '仓库内无 .env 实体' (-not (Test-Path -LiteralPath (Join-Path $RepoRoot '.env'))) '存在 .env，确认其已被忽略且未提交'
+
+Write-Host '=== 6) 冒烟（cmd 直接调用入口 .bat --selftest） ==='
+if (-not $SkipSmoke -and $cfg.verify.cmd_smoke.enabled) {
+    $bat = Join-Path $scriptsDir $batName
+    $out = cmd.exe /c "`"$bat`" --selftest" 2>&1 | Out-String
+    Check ('入口 .bat 冒烟（期望含 {0}）' -f $cfg.verify.cmd_smoke.expect_substring) ($out -match [regex]::Escape($cfg.verify.cmd_smoke.expect_substring)) ($out.Substring(0, [Math]::Min(400, $out.Length)))
+} else {
+    Write-Host '  已跳过冒烟（-SkipSmoke 或配置关闭）'
+}
+
+if ($script:Fail -eq 0) {
+    Write-Host ''
+    Write-Host 'VERIFY OK - 全部校验通过' -ForegroundColor Green
+    exit 0
+}
+Write-Host ''
+Write-Host ("VERIFY FAIL - {0} 项未通过" -f $script:Fail) -ForegroundColor Red
+exit 1

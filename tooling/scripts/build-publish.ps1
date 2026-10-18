@@ -1,0 +1,248 @@
+﻿#Requires -Version 5.1
+<#
+.SYNOPSIS
+    一键构建 → 门禁 → 组装发布资产 → 发布到 GitHub Releases（全程配置驱动）
+.DESCRIPTION
+    参数全部来自 config.json：本文件不出现任何项目名 / 路径 / 版本 / 仓库坐标字面量。
+    流程：读取配置 → 解析版本 → 执行 build_pipeline.steps（含红线门禁与资产组装）
+    → 定位发布资产 → 准备发布说明 → 交互确认 → 逐个调用通用发布器上传资产。
+
+    对外动作有闸门：不带 -Force 且不带 -DryRun 时，发布前必须字面输入 YES。
+    -SelfTest 只做结构与配置校验，不构建、不联网，供 .bat 冒烟与 verify.ps1 使用。
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$ConfigPath,
+    [Parameter(Mandatory = $true)][string]$RepoRoot,
+    [switch]$DryRun,
+    [switch]$Force,
+    [switch]$SelfTest
+)
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+# 与 .bat 的 chcp 取值保持一致（单一真相源：config.encoding.bat_chcp）
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+function Write-Step($msg)  { Write-Host $msg -ForegroundColor Cyan }
+function Write-Info($msg)  { Write-Host $msg }
+function Write-Ok($msg)    { Write-Host $msg -ForegroundColor Green }
+function Write-Bad($msg)   { Write-Host $msg -ForegroundColor Red }
+
+if (-not (Test-Path -LiteralPath $ConfigPath)) { Write-Bad "[publish] config 未找到: $ConfigPath"; exit 1 }
+$cfg = Get-Content -Raw -Encoding UTF8 $ConfigPath | ConvertFrom-Json
+
+# 子进程编码：Python 默认按 ANSI(cp936) 写 stdout，控制台却是 65001，中文即乱码
+if ($cfg.encoding.child_pythonioencoding) { $env:PYTHONIOENCODING = $cfg.encoding.child_pythonioencoding }
+
+# ---- 占位符展开：{{slug}} {{ver}} {{repo}} {{name}} ----
+function Expand-Token([string]$text, [hashtable]$map) {
+    if (-not $text) { return $text }
+    foreach ($k in $map.Keys) { $text = $text.Replace('{{' + $k + '}}', [string]$map[$k]) }
+    return $text
+}
+
+function Join-Repo([string]$rel) {
+    if ([System.IO.Path]::IsPathRooted($rel)) { return $rel }
+    return (Join-Path $RepoRoot $rel)
+}
+
+# ---- 运行时解析：候选列表 → 命令探测，绝不写死用户目录 ----
+function Resolve-Runtime([string[]]$candidates, [string]$fallbackCmd) {
+    foreach ($c in $candidates) {
+        if (-not $c) { continue }
+        $p = [System.Environment]::ExpandEnvironmentVariables($c)
+        if (Test-Path -LiteralPath $p) { return $p }
+        $g = Get-Command $p -ErrorAction SilentlyContinue
+        if ($g) { return $g.Source }
+    }
+    $g = Get-Command $fallbackCmd -ErrorAction SilentlyContinue
+    if ($g) { return $g.Source }
+    return $null
+}
+
+# ---- 版本解析：config.project.version_source → 正则捕获 → git describe 兜底 ----
+function Get-ReleaseVersion {
+    $vs = $cfg.project.version_source
+    $ver = $null
+    if ($vs -and $vs.file -and $vs.pattern) {
+        $f = Join-Repo $vs.file
+        if (Test-Path -LiteralPath $f) {
+            $txt = Get-Content -Raw -Encoding UTF8 $f
+            $m = [regex]::Match($txt, $vs.pattern)
+            if ($m.Success) { $ver = $m.Groups[1].Value }
+        }
+    }
+    if (-not $ver -and $vs.fallback -eq 'git_describe') {
+        $ver = (git -C $RepoRoot describe --tags --abbrev=0 2>$null)
+        if ($ver) { $ver = $ver.Trim() }
+    }
+    if (-not $ver) { throw "无法解析版本号（version_source 未命中且 git describe 无标签）" }
+    if ($vs.strip_prefix -and $ver.StartsWith($vs.strip_prefix)) { $ver = $ver.Substring($vs.strip_prefix.Length) }
+    return $ver
+}
+
+# ---- 步骤执行：on_fail = stop | warn | skip ----
+function Invoke-Step($step, $idx, $total, $map) {
+    $name = Expand-Token $step.name $map
+    if ($step.PSObject.Properties.Name -contains 'enabled' -and -not $step.enabled) {
+        Write-Info "  [$idx/$total] $name —— 配置中已禁用，跳过"
+        return
+    }
+    $cmd = Expand-Token $step.command $map
+    Write-Step "  [$idx/$total] $name"
+    Write-Info "    > $cmd"
+    $out = Invoke-Expression $cmd 2>&1
+    $out | ForEach-Object { Write-Info "    | $_" }
+    if ($LASTEXITCODE -ne 0) {
+        $onFail = if ($step.on_fail) { $step.on_fail } else { 'stop' }
+        if ($onFail -eq 'warn') { Write-Host "    步骤失败（exit $LASTEXITCODE），按 on_fail=warn 继续" -ForegroundColor Yellow; return }
+        if ($onFail -eq 'skip') { Write-Host "    步骤失败（exit $LASTEXITCODE），按 on_fail=skip 跳过" -ForegroundColor Yellow; return }
+        throw "步骤失败（exit $LASTEXITCODE）：$name"
+    }
+    if ($step.require_zero_failed -and $step.expect_pattern) {
+        $joined = ($out | Out-String)
+        $m = [regex]::Match($joined, $step.expect_pattern)
+        if (-not $m.Success) { throw "未在输出中匹配到断言统计：$name" }
+        if ([int]$m.Groups[2].Value -ne 0) { throw "回归存在失败项（$($m.Groups[2].Value) failed）：$name" }
+        Write-Ok "    断言通过：$($m.Groups[1].Value) passed / 0 failed"
+    }
+}
+
+# ---- 资产定位：目录内按 glob 匹配、剔除 exclude、按修改时间取最新 ----
+function Get-Asset([string]$adir, [string]$glob, [string[]]$excludes) {
+    $d = Join-Repo $adir
+    if (-not (Test-Path -LiteralPath $d)) { throw "资产目录不存在：$d" }
+    $cands = Get-ChildItem -LiteralPath $d -File | Where-Object {
+        $n = $_.Name
+        ($n -like $glob) -and (-not ($excludes | Where-Object { $n -like $_ }))
+    } | Sort-Object LastWriteTime -Descending
+    if (-not $cands -or $cands.Count -eq 0) { throw "未找到发布资产：$glob（目录 $d）" }
+    return $cands[0].FullName
+}
+
+# ---- 发布说明：优先正式说明 → 模板生成 → git log 自动生成 ----
+function Get-Notes([string]$ver, $map, $rel, [bool]$Redirect) {
+    $notesPath = Join-Repo (Expand-Token $rel.notes.path_template $map)
+    if (Test-Path -LiteralPath $notesPath) { return $notesPath }
+    if ($Redirect) {
+        # DryRun 下生成物落进 release 目录（已被 .gitignore 忽略），不污染仓库根说明位
+        $rd = Join-Repo $cfg.paths.release_dir
+        if (-not (Test-Path -LiteralPath $rd)) { [void](New-Item -ItemType Directory -Path $rd) }
+        $notesPath = Join-Path $rd ([System.IO.Path]::GetFileName($notesPath))
+    }
+    if ($rel.notes.template_file) {
+        $tpl = Join-Repo (Expand-Token $rel.notes.template_file $map)
+        if (Test-Path -LiteralPath $tpl) {
+            $body = Get-Content -Raw -Encoding UTF8 $tpl
+            foreach ($k in $map.Keys) { $body = $body.Replace('{{' + $k + '}}', [string]$map[$k]) }
+            [System.IO.File]::WriteAllText($notesPath, $body, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Info "  由模板生成发布说明：$notesPath"
+            return $notesPath
+        }
+    }
+    if ($rel.notes.auto_generate) {
+        $logArgs = if ($rel.notes.auto_generate_git_log) { $rel.notes.auto_generate_git_log -split ' ' } else { @('--no-merges', '--oneline', '-20') }
+        $log = git -C $RepoRoot log $logArgs 2>$null
+        $head = "# {{name}} {{ver}}".Replace('{{name}}', $cfg.project.name).Replace('{{ver}}', $ver)
+        $notice = if ($rel.notes.auto_generate_notice) { $rel.notes.auto_generate_notice } else { '' }
+        $content = $head + "`r`n`r`n" + $notice + "`r`n`r`n" + ($log -join "`r`n") + "`r`n"
+        [System.IO.File]::WriteAllText($notesPath, $content, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "  未找到正式说明，已按 git log 自动生成：$notesPath" -ForegroundColor Yellow
+        return $notesPath
+    }
+    throw "发布说明不存在且未启用自动生成：$notesPath"
+}
+
+Push-Location $RepoRoot
+try {
+    # ---- 0) 自检模式：只验结构与配置 ----
+    if ($SelfTest) {
+        Write-Step '[selftest] 校验配置结构与运行时可达性'
+        foreach ($req in @('project', 'encoding', 'paths', 'build_pipeline', 'release_gate', 'github_release')) {
+            if (-not $cfg.PSObject.Properties.Name -contains $req) { throw "config 缺少必需块：$req" }
+        }
+        $py = Resolve-Runtime $cfg.runtime.python_candidates 'python'
+        if (-not $py) { throw '未找到 python 解释器' }
+        $nd = Resolve-Runtime $cfg.runtime.node_candidates 'node'
+        if (-not $nd) { throw '未找到 node 解释器' }
+        Write-Info "  python = $py"
+        Write-Info "  node   = $nd"
+        $ver = Get-ReleaseVersion
+        Write-Info "  版本   = $ver"
+        Write-Ok 'SELFTEST OK'
+        exit 0
+    }
+
+    $rel = $cfg.github_release
+    if (-not $rel -or $rel.enabled -ne $true) { Write-Host '[publish] github_release.enabled 非 true，跳过发布' -ForegroundColor Yellow; exit 0 }
+    if ($DryRun) { $rel.dry_run = $true }
+
+    # ---- 1) 版本与占位符表 ----
+    $ver = Get-ReleaseVersion
+    $map = @{ slug = $cfg.project.slug; ver = $ver; name = $cfg.project.name; repo = $rel.repo }
+    Write-Step "[publish] 版本 $ver（来源：$($cfg.project.version_source.file)）"
+
+    # ---- 2) 构建流水线（含红线门禁与资产组装） ----
+    $steps = $cfg.build_pipeline.steps
+    $i = 0
+    foreach ($s in $steps) { $i++; Invoke-Step $s $i $steps.Count $map }
+
+    # ---- 3) 定位资产 ----
+    Write-Step '[publish] 定位发布资产'
+    $assets = @()
+    foreach ($a in $rel.assets) {
+        $glob = Expand-Token $a.glob $map
+        $p = Get-Asset $a.dir $glob $a.exclude_patterns
+        $display = Expand-Token $a.display_name_template $map
+        $assets += [pscustomobject]@{ Path = $p; Display = $display }
+        Write-Ok "  $(Split-Path $p -Leaf)  ->  $display"
+    }
+
+    # ---- 4) 发布说明 ----
+    $notes = Get-Notes $ver $map $rel ($rel.dry_run -eq $true)
+    Write-Info "[publish] 说明：$notes"
+
+    # ---- 5) 对外发布闸门 ----
+    $target = "$($rel.repo)@$ver"
+    if ($rel.dry_run) {
+        Write-Host "[publish] DRY-RUN：只打印计划，不触碰 GitHub" -ForegroundColor Yellow
+        foreach ($a in $assets) { Write-Info "  将上传 $($a.Display)（$([System.IO.Path]::GetFileName($a.Path))）" }
+    }
+    else {
+        if ($rel.confirm_before_publish -and -not $Force) {
+            Write-Host ''
+            Write-Host "$($rel.confirm_prompt)：$target" -ForegroundColor Yellow
+            $ans = Read-Host '输入'
+            if ($ans -ne 'YES') { Write-Host '[publish] 已取消，未对外发布'; exit 0 }
+        }
+        $py = Resolve-Runtime $cfg.runtime.python_candidates 'python'
+        if (-not $py) { throw '未找到 python 解释器，无法调用发布器' }
+        $pub = Join-Repo $rel.publish_script
+        if (-not (Test-Path -LiteralPath $pub)) { throw "发布器不存在：$pub" }
+
+        $env:GH_TAG = $ver
+        if ($rel.repo) { $env:GH_REPO = $rel.repo }
+        if ($rel.api_base) { $env:GH_API_BASE = $rel.api_base }
+        if ($rel.draft) { $env:GH_DRAFT = '1' }
+        if ($rel.prerelease) { $env:GH_PRERELEASE = '1' }
+        if ($rel.token.env_var_name) { $env:GH_TOKEN_ENV = $rel.token.env_var_name }
+
+        foreach ($a in $assets) {
+            Write-Step "[publish] 上传资产 $($a.Display)"
+            & $py $pub $a.Path $notes $a.Display
+            if ($LASTEXITCODE -ne 0) { throw "发布失败（exit $LASTEXITCODE）：$($a.Display)" }
+        }
+        Write-Ok ("发布完成：" + (Expand-Token $rel.release_url_template $map))
+    }
+    Write-Ok '[publish] 流程结束'
+    exit 0
+}
+catch {
+    Write-Bad "[publish] $($_.Exception.Message)"
+    exit 1
+}
+finally {
+    Pop-Location
+}

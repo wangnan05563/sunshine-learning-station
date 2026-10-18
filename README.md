@@ -164,15 +164,25 @@ python _build_docs.py
 # 4) 重新生成品牌资产（需 Pillow）
 python _gen_assets.py           # 全量：logo / favicon / svg / 社交预览图
 python _gen_assets.py preview   # 只重建 GitHub 社交预览图
+
+# 5) 一键发布：跑回归 → 红线门禁 → 组装 release 资产 → 发布 GitHub Releases
+tooling\scripts\一键发布.bat --dry-run   # 只构建与打印计划，不碰网络
+tooling\scripts\一键发布.bat             # 真正发布（输入 YES 确认；token 走 .env 或 git 凭据库）
+powershell -NoProfile -ExecutionPolicy Bypass -File tooling\scripts\verify.ps1 `
+  -ConfigPath tooling\scripts\config.json -RepoRoot .   # 脚本套件自身的编码/语法/冒烟校验
+python tooling\scripts\_gen_scripts.py   # 改过 templates 后重新生成脚本（生成物勿手改）
 ```
 
 仓库结构：
 
 ```text
 ├── 阳光学习能量站.html              # 应用本体（单文件，双击即用）
+├── LICENSE                          # MIT 许可证全文
 ├── verify_dom_stub.js               # DOM 桩回归（719 条断言）
 ├── verify_browser_real.js           # 真实浏览器回归 harness（Playwright + 系统 Chrome）
 ├── assets/                          # logo（png/svg）、favicon、GitHub 社交预览图
+├── tooling/scripts/                 # 一键发布套件（config + 入口 .bat + .ps1 逻辑 + 门禁/发布器 + 校验）
+├── release/                         # 发布产物（.zip 与裸单文件），已 gitignore
 ├── 阳光学习能量站-*.md/.docx/.pdf    # 需求规格 / 概要设计 / 详细设计 等文档
 ├── _build_docs.py                   # md → docx/pdf 文档构建
 └── _gen_assets.py                   # 品牌资产程序化生成（预览图的源文件）
@@ -199,6 +209,7 @@ python _gen_assets.py preview   # 只重建 GitHub 社交预览图
 内容如实说明，避免误导：
 
 - **回归脚本依赖本机环境**：`verify_dom_stub.js` 零依赖可直接跑；`verify_browser_real.js` 需要 Playwright 与本机 Chrome/Edge，脚本内以绝对路径引用浏览器驱动与证据输出目录，换机器需先装 Playwright 并调整这几处路径。
+- **一键发布脚本已验证到 dry-run**：`tooling\scripts\一键发布.bat` 的构建、红线门禁、资产组装、说明生成与发布计划均经实测通过；**真正发布**需本机具备到 `api.github.com` 的网络与 `GH_TOKEN`（或 git 凭据库中的 github.com 凭证），这两项无法在离线开发机上自证，首次真实发布请人工核对 Release 页面。
 - **iOS Safari 真机未实测**：音频解锁手势与触屏键高在桌面浏览器的移动模拟下验证过，未覆盖 Apple 真机。
 - **快照 ≠ 跨设备备份**：本机快照与主存档同生命周期，浏览器清缓存即失效；跨设备迁移只能靠「导出文件」或用户自启的云同步。
 - **云同步需自备服务**：仅支持 WebDAV（NAS / Nextcloud 等），默认关闭，不提供托管存储。
